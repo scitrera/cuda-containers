@@ -155,7 +155,7 @@ Example output:
 * NCCL is upgraded relative to upstream PyTorch builds
 * PyTorch, Triton, and vLLM are rebuilt accordingly
 * Image sizes could still be optimized further
-* Version combinations are chosen for **stability**, not maximum novelty
+* Version combinations are chosen to be as new as possible but limited by **stability** (not guaranteed to have the latest features if they might break things)
 
 ---
 
