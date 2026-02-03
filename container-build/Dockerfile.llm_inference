@@ -1,0 +1,242 @@
+ARG DEV_BASE_IMAGE=scitrera/dgx-spark-pytorch-dev:2.9.1-cu130
+ARG RUN_BASE_IMAGE=scitrera/dgx-spark-pytorch:2.9.1-cu130
+
+FROM ${DEV_BASE_IMAGE} AS builder_with_python_deps
+
+ARG FLASHINFER_PRE=0
+ARG TRANSFORMERS_VERSION=""
+ARG TRANSFORMERS_REF=""
+ARG TRANSFORMERS_PRE=0
+ARG FLASHINFER_VERSION="0.6.0"
+
+# Install additional dependencies
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install xgrammar fastsafetensors
+
+# Install FlashInfer packages;
+# TODO: also support FLASHINFER_REF to build directly from git
+# TODO: support cu versions other than cu130 / update index address as needed (20260121: cu130 is latest)
+# - If FLASHINFER_VERSION set: install that specific version for all packages
+# - If FLASHINFER_PRE=1: install latest prerelease
+# - Otherwise: install current stable
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    if [ -n "$FLASHINFER_VERSION" ]; then \
+        uv pip install --pre flashinfer-python==${FLASHINFER_VERSION} --no-deps --index-url https://flashinfer.ai/whl && \
+        uv pip install --pre flashinfer-cubin==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl && \
+        uv pip install --pre flashinfer-jit-cache==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl/cu130; \
+    elif [ "$FLASHINFER_PRE" = "1" ]; then \
+        uv pip install --pre flashinfer-python --no-deps --index-url https://flashinfer.ai/whl && \
+        uv pip install --pre flashinfer-cubin --index-url https://flashinfer.ai/whl && \
+        uv pip install --pre flashinfer-jit-cache --index-url https://flashinfer.ai/whl/cu130; \
+    else \
+        uv pip install flashinfer-python --no-deps --index-url https://flashinfer.ai/whl && \
+        uv pip install flashinfer-cubin --index-url https://flashinfer.ai/whl && \
+        uv pip install flashinfer-jit-cache --index-url https://flashinfer.ai/whl/cu130; \
+    fi &&  uv pip install \
+    apache-tvm-ffi \
+    nvidia-cudnn-frontend \
+    nvidia-cutlass-dsl \
+    nvidia-ml-py \
+    tabulate
+
+# TODO: transformers should be built later / separate stage for more efficient changes in transformers version!
+# transformers installation
+# - If TRANSFORMERS_REF set: install that git ref (branch, tag, or commit)
+# - If TRANSFORMERS_VERSION set: install that version (with --pre to allow any version type)
+# - If TRANSFORMERS_PRE=1: install latest pre-release
+# - Otherwise: do nothing (transformers installed via dependencies as needed)
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    if [ -n "$TRANSFORMERS_REF" ]; then \
+        uv pip install -U git+https://github.com/huggingface/transformers.git@${TRANSFORMERS_REF}; \
+    elif [ -n "$TRANSFORMERS_VERSION" ]; then \
+        uv pip install -U transformers==${TRANSFORMERS_VERSION} --pre; \
+    elif [ "$TRANSFORMERS_PRE" = "1" ]; then \
+        uv pip install -U transformers --pre; \
+    fi
+
+# Ensure ray installed; late install of numba to manage numpy version
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install \
+      ray[default] \
+      numba
+
+# Stage 5: (Still Python) Build Triton
+FROM builder_with_python_deps AS triton_builder
+
+ARG TRITON_VERSION="3.5.1"
+ARG TRITON_REF="v${TRITON_VERSION}"
+
+WORKDIR /data
+RUN if echo "${TRITON_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
+        git clone https://github.com/triton-lang/triton.git && \
+        cd triton && \
+        git checkout "${TRITON_REF}"; \
+    else \
+        git clone -b "${TRITON_REF}" --depth 1 https://github.com/triton-lang/triton.git; \
+    fi
+WORKDIR /data/triton
+
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    git submodule sync && \
+    git submodule update --init --recursive && \
+    uv pip install -r python/requirements.txt && \
+    mkdir -p /data/wheels && \
+    rm -rf .git && \
+    uv build --no-build-isolation --out-dir=/data/wheels -v . && \
+    uv build --no-build-isolation --no-index --out-dir=/data/wheels python/triton_kernels
+
+FROM triton_builder AS vllm_builder
+
+ARG VLLM_VERSION="0.13.0"
+ARG VLLM_REF="v${VLLM_VERSION}"
+ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
+ARG TRANSFORMERS_PRE=0
+ARG TRANSFORMERS_VERSION=""
+
+# Point vLLM's CMake to our local triton_kernels source instead of fetching from git
+ENV TRITON_KERNELS_SRC_DIR=/data/triton/python/triton_kernels
+
+# Install triton wheels before vllm build (so triton is available during build)
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install /data/wheels/*.whl
+
+WORKDIR /data
+
+RUN if echo "${VLLM_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
+        git clone "$VLLM_REPO" && \
+        cd vllm && \
+        git checkout "${VLLM_REF}" && \
+        git submodule update --init --recursive; \
+    else \
+        git clone -b "${VLLM_REF}" --depth 1 --recursive "$VLLM_REPO"; \
+    fi
+
+WORKDIR /data/vllm
+
+# support packages for multimodal, etc., e.g.: qwen-vl-utils
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install \
+        qwen-vl-utils
+
+# requirements
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    python3 use_existing_torch.py && \
+    sed -i "/flashinfer/d" requirements/cuda.txt && \
+    sed -i '/^triton\b/d' requirements/test.txt && \
+    sed -i '/^fastsafetensors\b/d' requirements/test.txt && \
+    if [ "$TRANSFORMERS_PRE" = "1" ] || [ "$TRANSFORMERS_VERSION" != "" ]; then \
+        sed -i '/^transformers\b/d' requirements/common.txt; \
+        sed -i '/^transformers\b/d' requirements/test.txt; \
+    fi && \
+    uv pip install -r requirements/build.txt
+
+# build vllm
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install --no-build-isolation . -v
+
+# Reinstall numba to ensure compatibility (and manage numpy version)
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install -U numba
+
+FROM triton_builder AS sglang_builder
+
+ARG SGLANG_VERSION="0.5.7"
+ARG SGLANG_REF="v${SGLANG_VERSION}"
+ARG TRANSFORMERS_PRE=0
+
+# Install triton wheels before sglang build (so triton is available during build)
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install /data/wheels/*.whl
+
+WORKDIR /data
+
+RUN if echo "${SGLANG_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
+        git clone https://github.com/sgl-project/sglang.git && \
+        cd sglang && \
+        git checkout "${SGLANG_REF}" && \
+        git submodule update --init --recursive; \
+    else \
+        git clone -b "${SGLANG_REF}" --depth 1 --recursive https://github.com/sgl-project/sglang.git; \
+    fi
+
+WORKDIR /data/sglang
+
+# support packages for multimodal, etc., e.g.: qwen-vl-utils
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install \
+        qwen-vl-utils
+
+# build sglang
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    cd python && uv pip install --no-build-isolation . -v
+
+# build sgl-kernel (ensure consistency with current environment)
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    cd sgl-kernel && \
+      make install-deps && \
+      uv build --wheel \
+          -Cbuild-dir=build \
+          "-Cbuild.tool-args=-j${MAX_JOBS}" \
+          -Ccmake.args="-DSGL_KERNEL_COMPILE_THREADS=1;-DFETCHCONTENT_SOURCE_DIR_REPO-TRITON=/data/triton" \
+          . --verbose --color=always --no-build-isolation && \
+      uv pip install dist/*whl --force-reinstall --no-deps
+
+# Reinstall triton wheels to ensure our version takes precedence
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install --reinstall /data/wheels/*.whl
+
+ARG RUN_BASE_IMAGE
+FROM ${RUN_BASE_IMAGE} AS tiktoken_fetcher
+
+WORKDIR /data/tiktoken_encodings
+
+# Download Tiktoken files for gpt-oss models (2025)
+RUN wget -O o200k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken" && \
+    wget -O cl100k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+
+WORKDIR /data/nemotron3
+
+# Download nemotron 3 nano reasoning parser (from Hugging Face model repo)
+RUN wget -O nano_v3_reasoning_parser.py https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/resolve/main/nano_v3_reasoning_parser.py
+
+ARG RUN_BASE_IMAGE
+FROM ${RUN_BASE_IMAGE} AS vllm_runtime
+
+# Copy Triton, Python Dependencies, and vllm
+COPY --from=vllm_builder /usr/local/lib/python3.12/dist-packages /usr/local/lib/python3.12/dist-packages
+COPY --from=vllm_builder /usr/local/bin /usr/local/bin
+
+# Copy Tiktoken & other useful model-specific files
+COPY --from=tiktoken_fetcher /data/tiktoken_encodings /data/tiktoken_encodings
+COPY --from=tiktoken_fetcher /data/nemotron3/nano_v3_reasoning_parser.py /data/vllm/nano_v3_reasoning_parser.py
+
+WORKDIR /data/vllm
+ENV PATH=/data/vllm:$PATH \
+    TIKTOKEN_ENCODINGS_BASE=/data/tiktoken_encodings
+
+RUN apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ARG RUN_BASE_IMAGE
+FROM ${RUN_BASE_IMAGE} AS sglang_runtime
+
+# Copy Triton, Python Dependencies, and sglang
+COPY --from=sglang_builder /usr/local/lib/python3.12/dist-packages /usr/local/lib/python3.12/dist-packages
+COPY --from=sglang_builder /usr/local/bin /usr/local/bin
+
+# Copy Tiktoken files
+COPY --from=tiktoken_fetcher /data/tiktoken_encodings /data/tiktoken_encodings
+COPY --from=tiktoken_fetcher /data/nemotron3/nano_v3_reasoning_parser.py /data/sglang/nano_v3_reasoning_parser.py
+
+WORKDIR /data/sglang
+ENV PATH=/data/sglang:$PATH \
+    TIKTOKEN_ENCODINGS_BASE=/data/tiktoken_encodings
+
+RUN apt-get clean && rm -rf /var/lib/apt/lists/*
+
+

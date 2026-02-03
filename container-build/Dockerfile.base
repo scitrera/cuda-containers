@@ -1,0 +1,255 @@
+# Global Build Arguments
+ARG CUDA_VERSION="13.0.2"
+ARG BUILD_JOBS=8
+ARG NCCL_VERSION="2.28.9-1"
+ARG TORCH_CUDA_ARCH_LIST="12.1a"
+ARG NVCC_GENCODE="-gencode=arch=compute_121,code=sm_121"
+ARG TORCH_VERSION="2.9.1"
+ARG UBUNTU_VERSION="24.04"
+
+# Stage 1: Base Runtime Image
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS base
+
+ARG TORCH_CUDA_ARCH_LIST="12.1a"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PIP_CACHE_DIR=/root/.cache/pip \
+    UV_CACHE_DIR=/root/.cache/uv \
+    UV_SYSTEM_PYTHON=1 \
+    UV_BREAK_SYSTEM_PACKAGES=1 \
+    UV_LINK_MODE=copy \
+    CUDA_HOME=/usr/local/cuda \
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --allow-change-held-packages --no-install-recommends \
+        python3-pip \
+        python3-dev \
+        git \
+        wget \
+        libcudnn9-cuda-13 \
+        libibverbs1 \
+        rdma-core \
+        numactl \
+        openmpi-common \
+        openmpi-bin && \
+    ln -s /usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/openmpi /opt/openmpi
+
+ENV MPI_HOME=/opt/openmpi
+
+RUN pip install uv
+
+WORKDIR /data
+
+# STAGE 2: Build Tools Image
+FROM base AS builder_base
+
+ARG BUILD_JOBS=8
+
+ENV MAX_JOBS=${BUILD_JOBS} \
+    CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS} \
+    NINJAFLAGS="-j${BUILD_JOBS}" \
+    MAKEFLAGS="-j${BUILD_JOBS}" \
+    CCACHE_DIR=/root/.ccache \
+    CCACHE_MAXSIZE=20G \
+    CCACHE_COMPRESS=1 \
+    CMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    CMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+    PATH=/usr/lib/ccache:$PATH
+
+RUN apt-get update && \
+    apt-get install -y --allow-change-held-packages --no-install-recommends \
+        cmake \
+        build-essential \
+        ninja-build \
+        libcudnn9-dev-cuda-13 \
+        libibverbs-dev \
+        ccache \
+        libopenmpi-dev
+
+# Stage 3: Build NCCL and NCCL Tests
+FROM builder_base AS nccl_builder
+
+ARG NCCL_VERSION="2.28.9-1"
+ARG NCCL_REF="v${NCCL_VERSION}"
+ARG BUILD_JOBS=8
+ARG NVCC_GENCODE="-gencode=arch=compute_121,code=sm_121"
+
+WORKDIR /build
+
+RUN if echo "${NCCL_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
+        git clone https://github.com/NVIDIA/nccl.git && \
+        cd nccl && \
+        git checkout "${NCCL_REF}"; \
+    else \
+        git clone -b "${NCCL_REF}" --depth 1 https://github.com/NVIDIA/nccl.git; \
+    fi
+
+WORKDIR /build/nccl
+
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    make -j${BUILD_JOBS} src.build NVCC_GENCODE="${NVCC_GENCODE}"
+
+# Install NCCL to /usr/local for easy copying
+RUN make install PREFIX=/usr/local
+
+# Build NCCL tests
+WORKDIR /build
+
+ARG NCCL_TESTS_REF="master"
+RUN if echo "${NCCL_TESTS_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
+        git clone https://github.com/NVIDIA/nccl-tests.git && \
+        cd nccl-tests && \
+        git checkout "${NCCL_TESTS_REF}"; \
+    else \
+        git clone -b "${NCCL_TESTS_REF}" --depth 1 https://github.com/NVIDIA/nccl-tests.git; \
+    fi
+
+WORKDIR /build/nccl-tests
+
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    make -j${BUILD_JOBS} MPI=1 NCCL_HOME=/usr/local CUDA_HOME=${CUDA_HOME} MPI_HOME=${MPI_HOME}
+
+# Stage 4: Base Development Image
+FROM builder_base AS extensible_builder_base
+
+# Copy NCCL from nccl_builder
+COPY --from=nccl_builder /usr/local/lib/libnccl* /usr/local/lib/
+COPY --from=nccl_builder /usr/local/include/nccl* /usr/local/include/
+COPY --from=nccl_builder /build/nccl-tests/build/* /usr/local/bin/
+
+ENV NCCL_HOME=/usr/local \
+    LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
+# Stage 5: Base Image Ready for Runtimes
+FROM base AS sparky_the_third
+
+# Copy NCCL libraries and tests
+COPY --from=nccl_builder /usr/local/lib/libnccl* /usr/local/lib/
+COPY --from=nccl_builder /usr/local/include/nccl* /usr/local/include/
+COPY --from=nccl_builder /build/nccl-tests/build/* /usr/local/bin/
+
+# Runtime environment
+ENV NCCL_HOME=/usr/local \
+    LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH \
+    PATH=/data:$PATH
+
+# Stage 6: Build PyTorch & Friends from source
+FROM extensible_builder_base AS pytorch_builder
+
+ARG TORCH_VERSION="2.9.1"
+ARG TORCH_AUDIO_VERSION="2.9.1"
+ARG TORCH_VISION_VERSION="0.24.1"
+
+ARG TORCH_REF="v${TORCH_VERSION}"
+ARG TORCH_AUDIO_REF="v${TORCH_AUDIO_VERSION}"
+ARG TORCH_VISION_REF="v${TORCH_VISION_VERSION}"
+
+ARG BUILD_JOBS=8
+
+# PyTorch build configuration
+ENV USE_CUDA=1 \
+    USE_CUDNN=1 \
+    USE_CUBLAS=1 \
+    USE_CUSPARSELT=1 \
+    USE_CUFILE=0 \
+    USE_NCCL=1 \
+    USE_SYSTEM_NCCL=1 \
+    USE_DISTRIBUTED=1 \
+    USE_TENSORPIPE=1 \
+    USE_MPI=1 \
+    BUILD_TEST=0 \
+    USE_MKLDNN=1 \
+    USE_OPENMP=1 \
+    USE_FBGEMM=1 \
+    USE_FBGEMM_GENAI=1 \
+    USE_FLASH_ATTENTION=1 \
+    USE_MEM_EFF_ATTENTION=1 \
+    USE_NNPACK=0 \
+    USE_QNNPACK=0 \
+    USE_XNNPACK=0 \
+    PYTORCH_BUILD_VERSION=${TORCH_VERSION} \
+    PYTORCH_BUILD_NUMBER=1
+
+WORKDIR /build
+
+# Install Python build dependencies
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install \
+        numpy \
+        pyyaml \
+        typing_extensions \
+        sympy \
+        filelock \
+        networkx \
+        jinja2 \
+        fsspec \
+        packaging \
+        setuptools \
+        wheel \
+        cmake \
+        ninja \
+        numba
+
+# Clone PyTorch
+RUN if echo "${TORCH_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
+        git clone https://github.com/pytorch/pytorch.git && \
+        cd pytorch && \
+        git checkout "${TORCH_REF}" && \
+        git submodule update --init --recursive; \
+    else \
+        git clone --recursive --depth 1 -b ${TORCH_REF} https://github.com/pytorch/pytorch.git; \
+    fi
+
+WORKDIR /build/pytorch
+
+# Build & Install PyTorch
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    --mount=type=cache,target=/root/.cache/uv \
+    python3 setup.py bdist_wheel && \
+    uv pip install /build/pytorch/dist/*.whl
+
+# Build & install torchvision
+WORKDIR /build
+RUN if echo "${TORCH_VISION_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
+        git clone https://github.com/pytorch/vision.git && \
+        cd vision && \
+        git checkout "${TORCH_VISION_REF}" && \
+        git submodule update --init --recursive; \
+    else \
+        git clone --recursive --depth 1 -b ${TORCH_VISION_REF} https://github.com/pytorch/vision.git; \
+    fi
+WORKDIR /build/vision
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    --mount=type=cache,target=/root/.cache/uv \
+    python3 setup.py bdist_wheel && \
+    uv pip install /build/vision/dist/*.whl
+
+# Build & install torchaudio
+WORKDIR /build
+RUN if echo "${TORCH_AUDIO_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
+        git clone https://github.com/pytorch/audio.git && \
+        cd audio && \
+        git checkout "${TORCH_AUDIO_REF}" && \
+        git submodule update --init --recursive; \
+    else \
+        git clone --recursive --depth 1 -b ${TORCH_AUDIO_REF} https://github.com/pytorch/audio.git; \
+    fi
+WORKDIR /build/audio
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    --mount=type=cache,target=/root/.cache/uv \
+    python3 setup.py bdist_wheel && \
+    uv pip install /build/audio/dist/*.whl
+
+
+# Stage 7: Runtime image with PyTorch installed
+# TODO: pytorch runtime base image should try to be based on the upstream cuda runtime image to be lighter
+FROM sparky_the_third AS pytorch_runtime
+
+# copy installed packages from the builder
+COPY --from=pytorch_builder /usr/local/lib/python3.12/dist-packages /usr/local/lib/python3.12/dist-packages
+COPY --from=pytorch_builder /usr/local/bin /usr/local/bin
+
+WORKDIR /data
