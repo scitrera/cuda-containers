@@ -42,10 +42,10 @@ All vLLM images:
 
 #### Latest Releases
 
-##### vLLM 0.15.0
+##### vLLM 0.15.1
 
-- `scitrera/dgx-spark-vllm:0.15.0-t4`
-    - vLLM 0.15.0
+- `scitrera/dgx-spark-vllm:0.15.1-t4`
+    - vLLM 0.15.1
     - PyTorch 2.10.0 (with torchvision + torchaudio)
     - CUDA 13.1.0
     - Transformers 4.57.6
@@ -53,8 +53,13 @@ All vLLM images:
     - NCCL 2.29.2-1
     - FlashInfer 0.6.2
 
-- `scitrera/dgx-spark-vllm:0.15.0-t5`
+- `scitrera/dgx-spark-vllm:0.15.1-t5`
     - Same as above, but with **Transformers 5.0.0**
+
+##### vLLM 0.15.0
+
+- `scitrera/dgx-spark-vllm:0.15.0-t4`
+- `scitrera/dgx-spark-vllm:0.15.0-t5`
 
 ##### vLLM 0.14.1
 
