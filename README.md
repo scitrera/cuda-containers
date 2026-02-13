@@ -54,7 +54,7 @@ All vLLM images:
     - NCCL 2.29.3-1
     - FlashInfer 0.6.3
 
-- `scitrera/dgx-spark-vllm:0.15.1-t5`
+- `scitrera/dgx-spark-vllm:0.16.0-t5`
     - Same as above, but with **Transformers 5.1.0**
 
 ##### vLLM 0.15.1
