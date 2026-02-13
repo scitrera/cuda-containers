@@ -4,9 +4,6 @@ ARG RUN_BASE_IMAGE=scitrera/dgx-spark-pytorch:2.9.1-cu130
 FROM ${DEV_BASE_IMAGE} AS builder_with_python_deps
 
 ARG FLASHINFER_PRE=0
-ARG TRANSFORMERS_VERSION=""
-ARG TRANSFORMERS_REF=""
-ARG TRANSFORMERS_PRE=0
 ARG FLASHINFER_VERSION="0.6.0"
 
 # Install additional dependencies
@@ -15,7 +12,7 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
 
 # Install FlashInfer packages;
 # TODO: also support FLASHINFER_REF to build directly from git
-# TODO: support cu versions other than cu130 / update index address as needed (20260121: cu130 is latest)
+# TODO: support cu versions other than cu130 / update index address as needed (20260213: cu130 is latest)
 # - If FLASHINFER_VERSION set: install that specific version for all packages
 # - If FLASHINFER_PRE=1: install latest prerelease
 # - Otherwise: install current stable
@@ -38,21 +35,6 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     nvidia-cutlass-dsl \
     nvidia-ml-py \
     tabulate
-
-# TODO: transformers should be built later / separate stage for more efficient changes in transformers version!
-# transformers installation
-# - If TRANSFORMERS_REF set: install that git ref (branch, tag, or commit)
-# - If TRANSFORMERS_VERSION set: install that version (with --pre to allow any version type)
-# - If TRANSFORMERS_PRE=1: install latest pre-release
-# - Otherwise: do nothing (transformers installed via dependencies as needed)
-RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    if [ -n "$TRANSFORMERS_REF" ]; then \
-        uv pip install -U git+https://github.com/huggingface/transformers.git@${TRANSFORMERS_REF}; \
-    elif [ -n "$TRANSFORMERS_VERSION" ]; then \
-        uv pip install -U transformers==${TRANSFORMERS_VERSION} --pre; \
-    elif [ "$TRANSFORMERS_PRE" = "1" ]; then \
-        uv pip install -U transformers --pre; \
-    fi
 
 # Ensure ray installed; late install of numba to manage numpy version
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
@@ -91,8 +73,6 @@ FROM triton_builder AS vllm_builder
 ARG VLLM_VERSION="0.13.0"
 ARG VLLM_REF="v${VLLM_VERSION}"
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
-ARG TRANSFORMERS_PRE=0
-ARG TRANSFORMERS_VERSION=""
 
 # Point vLLM's CMake to our local triton_kernels source instead of fetching from git
 ENV TRITON_KERNELS_SRC_DIR=/data/triton/python/triton_kernels
@@ -126,10 +106,6 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     sed -i "/flashinfer/d" requirements/cuda.txt && \
     sed -i '/^triton\b/d' requirements/test.txt && \
     sed -i '/^fastsafetensors\b/d' requirements/test.txt && \
-    if [ "$TRANSFORMERS_PRE" = "1" ] || [ "$TRANSFORMERS_VERSION" != "" ]; then \
-        sed -i '/^transformers\b/d' requirements/common.txt; \
-        sed -i '/^transformers\b/d' requirements/test.txt; \
-    fi && \
     uv pip install -r requirements/build.txt
 
 # build vllm
@@ -140,6 +116,23 @@ RUN --mount=type=cache,id=ccache,target=/root/.ccache \
 # Reinstall numba to ensure compatibility (and manage numpy version)
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv pip install -U numba
+
+# late transformers installation to override vllm defaults
+# - If TRANSFORMERS_REF set: install that git ref (branch, tag, or commit)
+# - If TRANSFORMERS_VERSION set: install that version (with --pre to allow any version type)
+# - If TRANSFORMERS_PRE=1: install latest pre-release
+# - Otherwise: do nothing (transformers installed via dependencies as needed)
+ARG TRANSFORMERS_VERSION=""
+ARG TRANSFORMERS_REF=""
+ARG TRANSFORMERS_PRE=0
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    if [ -n "$TRANSFORMERS_REF" ]; then \
+        uv pip install -U git+https://github.com/huggingface/transformers.git@${TRANSFORMERS_REF}; \
+    elif [ -n "$TRANSFORMERS_VERSION" ]; then \
+        uv pip install -U transformers==${TRANSFORMERS_VERSION} --pre; \
+    elif [ "$TRANSFORMERS_PRE" = "1" ]; then \
+        uv pip install -U transformers --pre; \
+    fi
 
 FROM triton_builder AS sglang_builder
 
@@ -190,6 +183,23 @@ RUN --mount=type=cache,id=ccache,target=/root/.ccache \
 # Reinstall triton wheels to ensure our version takes precedence
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv pip install --reinstall /data/wheels/*.whl
+
+# late transformers installation to override sglang defaults
+# - If TRANSFORMERS_REF set: install that git ref (branch, tag, or commit)
+# - If TRANSFORMERS_VERSION set: install that version (with --pre to allow any version type)
+# - If TRANSFORMERS_PRE=1: install latest pre-release
+# - Otherwise: do nothing (transformers installed via dependencies as needed)
+ARG TRANSFORMERS_VERSION=""
+ARG TRANSFORMERS_REF=""
+ARG TRANSFORMERS_PRE=0
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    if [ -n "$TRANSFORMERS_REF" ]; then \
+        uv pip install -U git+https://github.com/huggingface/transformers.git@${TRANSFORMERS_REF}; \
+    elif [ -n "$TRANSFORMERS_VERSION" ]; then \
+        uv pip install -U transformers==${TRANSFORMERS_VERSION} --pre; \
+    elif [ "$TRANSFORMERS_PRE" = "1" ]; then \
+        uv pip install -U transformers --pre; \
+    fi
 
 ARG RUN_BASE_IMAGE
 FROM ${RUN_BASE_IMAGE} AS tiktoken_fetcher

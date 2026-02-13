@@ -38,9 +38,24 @@ All vLLM images:
 - Include **Ray** for multi-node / cluster deployments
 - Rebuild PyTorch, Triton, and vLLM against updated NCCL
 - Support tensor parallelism (`-tp`) and multi-node inference
-- are hosted on Docker Hub: [https://hub.docker.com/r/scitrera/dgx-spark-vllm](https://hub.docker.com/r/scitrera/dgx-spark-vllm)
+- are hosted on Docker
+  Hub: [https://hub.docker.com/r/scitrera/dgx-spark-vllm](https://hub.docker.com/r/scitrera/dgx-spark-vllm)
 
 #### Latest Releases
+
+##### vLLM 0.16.0
+
+- `scitrera/dgx-spark-vllm:0.16.0-t4`
+    - vLLM 0.16.0
+    - PyTorch 2.10.0 (with torchvision + torchaudio)
+    - CUDA 13.1.1
+    - Transformers 4.57.6
+    - Triton 3.6.0
+    - NCCL 2.29.3-1
+    - FlashInfer 0.6.3
+
+- `scitrera/dgx-spark-vllm:0.15.1-t5`
+    - Same as above, but with **Transformers 5.1.0**
 
 ##### vLLM 0.15.1
 
@@ -56,18 +71,12 @@ All vLLM images:
 - `scitrera/dgx-spark-vllm:0.15.1-t5`
     - Same as above, but with **Transformers 5.0.0**
 
-##### vLLM 0.15.0
+##### Earlier Builds
 
 - `scitrera/dgx-spark-vllm:0.15.0-t4`
 - `scitrera/dgx-spark-vllm:0.15.0-t5`
-
-##### vLLM 0.14.1
-
 - `scitrera/dgx-spark-vllm:0.14.1-t4`
 - `scitrera/dgx-spark-vllm:0.14.1-t5`
-
-##### Earlier Builds
-
 - `scitrera/dgx-spark-vllm:0.14.0-t4`
 - `scitrera/dgx-spark-vllm:0.14.0-t5`
     - Includes a patch to `is_deepseek_mla()` for **GLM-4.7-Flash**
@@ -80,6 +89,13 @@ All vLLM images:
 ### PyTorch Development Base Image
 
 If you want to build your own inference stack:
+
+- **`scitrera/dgx-spark-pytorch-dev:2.10.0-v2-cu131`**
+    - PyTorch 2.10.0
+    - CUDA 13.1.1
+    - NCCL 2.29.3-1
+    - Built on `nvidia/cuda:13.1.1-devel-ubuntu24.04`
+    - Includes standard build tooling
 
 - **`scitrera/dgx-spark-pytorch-dev:2.10.0-cu131`**
     - PyTorch 2.10.0
@@ -109,7 +125,7 @@ Tags follow this pattern for vllm containers:
 Examples:
 
 - `0.13.0-t4` → vLLM 0.13.0 + Transformers 4.x
-- `0.14.1-t5` → vLLM 0.14.1 + Transformers 5.x (pre-release or early)
+- `0.14.1-t5` → vLLM 0.14.1 + Transformers 5.x
 
 ---
 
@@ -160,12 +176,14 @@ Example output:
 * NCCL is upgraded relative to upstream PyTorch builds
 * PyTorch, Triton, and vLLM are rebuilt accordingly
 * Image sizes could still be optimized further
-* Version combinations are chosen to be as new as possible but limited by **stability** (not guaranteed to have the latest features if they might break things)
+* Version combinations are chosen to be as new as possible but limited by **stability** (not guaranteed to have the
+  latest features if they might break things)
 
 ---
 
 ## Roadmap (Loose)
 
+* per-layer size optimization (ensure no single layers exceed 10GB)
 * sglang images
 * Better size optimization
 * More documentation/support for DGX Spark newcomers
@@ -181,7 +199,8 @@ This work is inspired by and complementary to:
 * Everyone else who contributed to the NVIDIA DGX spark forums, especially in the first two months after the DGX Spark's
   release. Getting things to work was really a mess!
 
-This project is not affiliated with NVIDIA. This project is sponsored and maintained by [scitrera.ai](https://scitrera.ai/).
+This project is not affiliated with NVIDIA. This project is sponsored and maintained
+by [scitrera.ai](https://scitrera.ai/).
 
 If you need the very latest vLLM feature added four hours ago, start with eugr's repo.
 If you want stable, prebuilt images with predictable versioning, use the docker images built from this repo.
