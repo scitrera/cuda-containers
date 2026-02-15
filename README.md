@@ -1,5 +1,7 @@
 # CUDA Containers for NVIDIA DGX Spark
 
+https://github.com/scitrera/cuda-containers
+
 This repository contains Dockerfiles and build recipes for CUDA-based containers optimized for **NVIDIA DGX Spark**
 systems, with a focus on **vLLM**, **sglang**, **PyTorch**, and multi-node inference workloads.
 
