@@ -134,11 +134,19 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
         uv pip install -U transformers --pre; \
     fi
 
-FROM triton_builder AS sglang_builder
+# Break up dist-packages into smaller layers to avoid hitting Docker layer size limits;
+# exclude transformers which we want to handle separately to ensure better layer sharing between -t4 and -t5 variants
+COPY stages/directory_split.sh /opt/directory_split.sh
+RUN chmod +x /opt/directory_split.sh && \
+    /opt/directory_split.sh  \
+      /usr/local/lib/python3.12/dist-packages  \
+      4 \
+      --exclude "transformers*"
+
+FROM triton_builder AS sgl_prebuild
 
 ARG SGLANG_VERSION="0.5.7"
 ARG SGLANG_REF="v${SGLANG_VERSION}"
-ARG TRANSFORMERS_PRE=0
 
 # Install triton wheels before sglang build (so triton is available during build)
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
@@ -157,32 +165,80 @@ RUN if echo "${SGLANG_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
 
 WORKDIR /data/sglang
 
-# support packages for multimodal, etc., e.g.: qwen-vl-utils
+# support packages for building and multimodal, etc., e.g.: qwen-vl-utils
 RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv pip install \
+        grpcio-tools \
         qwen-vl-utils
 
-# build sglang
+# build/install sglang
 RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    cd python && uv pip install --no-build-isolation . -v
+    cd python && uv pip install --no-build-isolation . -v --no-deps
 
-# build sgl-kernel (ensure consistency with current environment)
+FROM sgl_prebuild AS sgl-kernel-builder
+
+# reduce **default** build jobs for sgl-kernel to reduce memory consumption
+ARG BUILD_JOBS=4
+ENV MAX_JOBS=${BUILD_JOBS}
+
+## reinstall sglang w/ dependencies to make sglang's preferred build environment..............
+#RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+#    --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+#    cd python && uv pip install --no-build-isolation . -v
+
+# prepare to build sgl-kernel (install-deps only installs build deps -- nothing dangerous/conflicting)
 RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     cd sgl-kernel && \
-      make install-deps && \
-      uv build --wheel \
-          -Cbuild-dir=build \
-          "-Cbuild.tool-args=-j${MAX_JOBS}" \
-          -Ccmake.args="-DSGL_KERNEL_COMPILE_THREADS=1;-DFETCHCONTENT_SOURCE_DIR_REPO-TRITON=/data/triton" \
-          . --verbose --color=always --no-build-isolation && \
-      uv pip install dist/*whl --force-reinstall --no-deps
+      make install-deps
 
-# Reinstall triton wheels to ensure our version takes precedence
+# build sgl-kernel  # TODO: patch build process to exclude architectures we don't need!
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+--mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+cd sgl-kernel && \
+  uv build --wheel \
+      -Cbuild-dir=build \
+      "-Cbuild.tool-args=-j${MAX_JOBS}" \
+      -Ccmake.args="-DSGL_KERNEL_COMPILE_THREADS=1;-DFETCHCONTENT_SOURCE_DIR_REPO-TRITON=/data/triton" \
+      . --verbose --color=always --no-build-isolation
+
+FROM sgl_prebuild AS sglang_builder
+
+# Install sgl-kernel wheels
+COPY --from=sgl-kernel-builder /data/sglang/sgl-kernel/dist/*.whl /data/sglang/sgl-kernel/dist/
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    uv pip install --reinstall /data/wheels/*.whl
+    uv pip install /data/sglang/sgl-kernel/dist/*.whl --no-deps && \
+        rm -rf /data/sglang/sgl-kernel/dist/*.whl
+
+
+# install missing dependencies without overwriting our work
+# TODO: configurable ARGS for add/remove ignored dependencies to allow smoother control from recipe
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install packaging
+COPY --chmod=0755  stages/missing_deps.py /opt/missing_deps.py
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    cd /data/sglang/python && \
+      /opt/missing_deps.py --extra diffusion \
+      --ignore apache-tvm-ffi \
+      --ignore cuda-python \
+      --ignore flashinfer_python \
+      --ignore flashinfer_cubin \
+      --ignore flashinfer_jit_cache \
+      --ignore nvidia-cutlass-dsl \
+      --ignore sgl-kernel \
+      --ignore triton \
+      --ignore transformers \
+      --ignore torch \
+      --ignore torchaudio \
+      --ignore torchvision \
+      --ignore torchcodec \
+      --ignore xgrammar \
+      > missing_deps.txt && \
+    uv pip install -r missing_deps.txt && \
+    rm missing_deps.txt && \
+    rm /opt/missing_deps.py
 
 # late transformers installation to override sglang defaults
 # - If TRANSFORMERS_REF set: install that git ref (branch, tag, or commit)
@@ -201,6 +257,15 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
         uv pip install -U transformers --pre; \
     fi
 
+# Break up dist-packages into smaller layers to avoid hitting Docker layer size limits;
+# exclude transformers which we want to handle separately to ensure better layer sharing between -t4 and -t5 variants
+COPY stages/directory_split.sh /opt/directory_split.sh
+RUN chmod +x /opt/directory_split.sh && \
+    /opt/directory_split.sh  \
+      /usr/local/lib/python3.12/dist-packages  \
+      4 \
+      --exclude "transformers*"
+
 ARG RUN_BASE_IMAGE
 FROM ${RUN_BASE_IMAGE} AS tiktoken_fetcher
 
@@ -218,9 +283,15 @@ RUN wget -O nano_v3_reasoning_parser.py https://huggingface.co/nvidia/NVIDIA-Nem
 ARG RUN_BASE_IMAGE
 FROM ${RUN_BASE_IMAGE} AS vllm_runtime
 
-# Copy Triton, Python Dependencies, and vllm
-COPY --from=vllm_builder /usr/local/lib/python3.12/dist-packages /usr/local/lib/python3.12/dist-packages
+# Copy Triton, Python Dependencies, and vllm -- broken into four layers to help manage layer sizes
+COPY --from=vllm_builder /usr/local/lib/python3.12/dist-packages-1/ /usr/local/lib/python3.12/dist-packages/
+COPY --from=vllm_builder /usr/local/lib/python3.12/dist-packages-2/ /usr/local/lib/python3.12/dist-packages/
+COPY --from=vllm_builder /usr/local/lib/python3.12/dist-packages-3/ /usr/local/lib/python3.12/dist-packages/
+COPY --from=vllm_builder /usr/local/lib/python3.12/dist-packages-4/ /usr/local/lib/python3.12/dist-packages/
 COPY --from=vllm_builder /usr/local/bin /usr/local/bin
+
+# Copy transformers separately to maximize layer sharing between transformers version variants
+COPY --from=vllm_builder --parents /usr/local/lib/python3.12/dist-packages/transformers* /
 
 # Copy Tiktoken & other useful model-specific files
 COPY --from=tiktoken_fetcher /data/tiktoken_encodings /data/tiktoken_encodings
@@ -236,10 +307,16 @@ ARG RUN_BASE_IMAGE
 FROM ${RUN_BASE_IMAGE} AS sglang_runtime
 
 # Copy Triton, Python Dependencies, and sglang
-COPY --from=sglang_builder /usr/local/lib/python3.12/dist-packages /usr/local/lib/python3.12/dist-packages
+COPY --from=sglang_builder /usr/local/lib/python3.12/dist-packages-1/ /usr/local/lib/python3.12/dist-packages/
+COPY --from=sglang_builder /usr/local/lib/python3.12/dist-packages-2/ /usr/local/lib/python3.12/dist-packages/
+COPY --from=sglang_builder /usr/local/lib/python3.12/dist-packages-3/ /usr/local/lib/python3.12/dist-packages/
+COPY --from=sglang_builder /usr/local/lib/python3.12/dist-packages-4/ /usr/local/lib/python3.12/dist-packages/
 COPY --from=sglang_builder /usr/local/bin /usr/local/bin
 
-# Copy Tiktoken files
+# Copy transformers separately to maximize layer sharing between transformers version variants
+COPY --from=sglang_builder --parents /usr/local/lib/python3.12/dist-packages/transformers* /
+
+# Copy Tiktoken & other useful model-specific files
 COPY --from=tiktoken_fetcher /data/tiktoken_encodings /data/tiktoken_encodings
 COPY --from=tiktoken_fetcher /data/nemotron3/nano_v3_reasoning_parser.py /data/sglang/nano_v3_reasoning_parser.py
 

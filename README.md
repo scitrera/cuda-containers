@@ -1,7 +1,7 @@
 # CUDA Containers for NVIDIA DGX Spark
 
 This repository contains Dockerfiles and build recipes for CUDA-based containers optimized for **NVIDIA DGX Spark**
-systems, with a focus on **vLLM**, **PyTorch**, and multi-node inference workloads.
+systems, with a focus on **vLLM**, **sglang**, **PyTorch**, and multi-node inference workloads.
 
 The primary goal of this project is to provide **stable, well-versioned, prebuilt images** that work out-of-the-box on
 DGX Spark (Blackwell-ready), while still being suitable as **base images** for custom builds.
@@ -25,6 +25,10 @@ standard) is:
 
 If you need the *absolute latest vLLM features from git right now*, I still strongly recommend:
 https://github.com/eugr/spark-vllm-docker
+
+For sglang, the officially provided container is not continuously updated. I assume that might change
+in the near future as sglang gets better SM121 support -- but in the meantime, Scitrera will, on a best effort basis,
+maintain sglang images similar to our vLLM images.
 
 ---
 
@@ -86,6 +90,31 @@ All vLLM images:
 
 ---
 
+### SGLang Images
+
+SGLang images are also optimized for DGX Spark and provide an alternative high-performance inference runtime.
+
+- are hosted on Docker
+  Hub: [https://hub.docker.com/r/scitrera/dgx-spark-sglang](https://hub.docker.com/r/scitrera/dgx-spark-sglang)
+
+#### Latest Releases
+
+##### SGLang 0.5.8
+
+- `scitrera/dgx-spark-sglang:0.5.8-t4`
+    - SGLang 0.5.8 (with build fixes post-release)
+    - PyTorch 2.10.0 (with torchvision + torchaudio)
+    - CUDA 13.1.1
+    - Transformers 4.57.6
+    - Triton 3.6.0
+    - NCCL 2.29.3-1
+    - FlashInfer 0.6.3
+
+- `scitrera/dgx-spark-sglang:0.5.8-t5`
+    - Same as above, but with **Transformers 5.1.0**
+
+---
+
 ### PyTorch Development Base Image
 
 If you want to build your own inference stack:
@@ -106,30 +135,30 @@ If you want to build your own inference stack:
 
 This is the recommended base image if you want to:
 
-- Build vLLM yourself
+- Build vLLM/sglang/other tools yourself
 - Add custom kernels or extensions
-- Experiment with alternative runtimes (e.g. sglang)
+- Experiment with alternative runtimes
 
 ---
 
 ## Tag Semantics
 
-Tags follow this pattern for vllm containers:
+Tags follow this pattern for vLLM and SGLang containers:
 
-```
+````
 
-<vllm-version>-t<transformers-major>
+<version>-t<transformers-major>
 
 ````
 
 Examples:
 
 - `0.13.0-t4` → vLLM 0.13.0 + Transformers 4.x
-- `0.14.1-t5` → vLLM 0.14.1 + Transformers 5.x
+- `0.5.8-t5` → SGLang 0.5.8 + Transformers 5.x
 
 ---
 
-## Example Usage
+## Example Usage (vLLM)
 
 ```bash
 docker run \
@@ -138,10 +167,27 @@ docker run \
   -it --rm \
   --network host --ipc=host \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
-  scitrera/dgx-spark-vllm:0.13.0-t4 \
+  scitrera/dgx-spark-vllm:0.16.0-t4 \
   vllm serve \
-    Qwen/Qwen3-1.7B \
-    --gpu-memory-utilization 0.7
+    Qwen/Qwen2.5-7B-Instruct \
+    --gpu-memory-utilization 0.4
+````
+
+---
+
+## Example Usage (SGLang)
+
+```bash
+docker run \
+  --privileged \
+  --gpus all \
+  -it --rm \
+  --network host --ipc=host \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  scitrera/dgx-spark-sglang:0.5.8-t4 \
+  sglang serve \
+    --model-path Qwen/Qwen2.5-7B-Instruct \
+    --mem-fraction-static 0.4
 ````
 
 ---
@@ -174,7 +220,7 @@ Example output:
 ## Notes & Caveats
 
 * NCCL is upgraded relative to upstream PyTorch builds
-* PyTorch, Triton, and vLLM are rebuilt accordingly
+* PyTorch, Triton, and vLLM/sglang are rebuilt accordingly
 * Image sizes could still be optimized further
 * Version combinations are chosen to be as new as possible but limited by **stability** (not guaranteed to have the
   latest features if they might break things)
@@ -183,8 +229,6 @@ Example output:
 
 ## Roadmap (Loose)
 
-* per-layer size optimization (ensure no single layers exceed 10GB)
-* sglang images
 * Better size optimization
 * More documentation/support for DGX Spark newcomers
 
@@ -203,4 +247,5 @@ This project is not affiliated with NVIDIA. This project is sponsored and mainta
 by [scitrera.ai](https://scitrera.ai/).
 
 If you need the very latest vLLM feature added four hours ago, start with eugr's repo.
+
 If you want stable, prebuilt images with predictable versioning, use the docker images built from this repo.
