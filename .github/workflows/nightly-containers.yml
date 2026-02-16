@@ -16,6 +16,10 @@ on:
         type: boolean
         default: false
 
+concurrency:
+  group: nightly-containers
+  cancel-in-progress: false
+
 jobs:
   discover:
     runs-on: ubuntu-latest
