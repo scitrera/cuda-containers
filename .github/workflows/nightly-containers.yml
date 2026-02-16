@@ -1,0 +1,158 @@
+name: Nightly Container Builds
+
+on:
+  schedule:
+    # Run daily at 6:00 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      recipe:
+        description: 'Specific recipe file path (e.g. container-recipes/nightly/vllm-nightly-t5.recipe). Leave blank to build all nightly recipes.'
+        required: false
+        type: string
+      no-cache:
+        description: 'Build without Docker layer cache'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Discover nightly recipes
+        id: set-matrix
+        run: |
+          input_recipe="${{ inputs.recipe }}"
+          if [[ -n "$input_recipe" ]]; then
+            if [[ ! -f "$input_recipe" ]]; then
+              echo "::error::Recipe file not found: ${input_recipe}"
+              exit 1
+            fi
+            recipes=$(echo "[\"${input_recipe}\"]")
+          else
+            recipes=$(find container-recipes/nightly -name '*.recipe' -type f | sort | jq -R -s -c 'split("\n") | map(select(. != ""))')
+          fi
+          echo "matrix={\"recipe\":${recipes}}" >> "$GITHUB_OUTPUT"
+          echo "Building recipes: ${recipes}"
+
+  build:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate date tag
+        id: date
+        run: echo "suffix=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Parse recipe file
+        id: recipe
+        run: |
+          recipe_file="${{ matrix.recipe }}"
+          echo "Parsing recipe: ${recipe_file}"
+
+          declare -A vars
+          while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$key" ]] && continue
+            key=$(echo "$key" | xargs)
+            value=$(echo "$value" | xargs | sed 's/^"//;s/"$//')
+            [[ -z "$key" ]] && continue
+            vars["$key"]="$value"
+          done < "$recipe_file"
+
+          # Validate required fields
+          if [[ -z "${vars[DOCKERFILE]:-}" ]]; then
+            echo "::error::Recipe missing required DOCKERFILE field"
+            exit 1
+          fi
+          if [[ -z "${vars[IMAGE_TAG]:-}" ]]; then
+            echo "::error::Recipe missing required IMAGE_TAG field"
+            exit 1
+          fi
+
+          echo "dockerfile=${vars[DOCKERFILE]}" >> "$GITHUB_OUTPUT"
+          echo "target=${vars[TARGET]:-}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${vars[IMAGE_TAG]}" >> "$GITHUB_OUTPUT"
+
+          # Determine target platforms (ARM64_ONLY defaults to 1)
+          arm64_only="${vars[ARM64_ONLY]:-1}"
+          if [[ "$arm64_only" == "0" ]]; then
+            echo "platforms=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
+          else
+            echo "platforms=linux/arm64" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Collect build args (everything except metadata/workflow keys)
+          {
+            echo "build_args<<RECIPE_EOF"
+            for key in "${!vars[@]}"; do
+              case "$key" in
+                DOCKERFILE|TARGET|IMAGE_TAG|ARM64_ONLY) ;;
+                *) echo "${key}=${vars[$key]}" ;;
+              esac
+            done
+            echo "RECIPE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          # Collect version labels (matching build-image.sh behavior)
+          {
+            echo "labels<<LABEL_EOF"
+            echo "maintainer=scitrera.ai <open-source-team@scitrera.com>"
+            for key in "${!vars[@]}"; do
+              if [[ "$key" == *_VERSION ]]; then
+                label_name="dev.scitrera.$(echo "$key" | tr '[:upper:]' '[:lower:]')"
+                echo "${label_name}=${vars[$key]}"
+              fi
+            done
+            echo "LABEL_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Image tag: ${vars[IMAGE_TAG]}"
+          echo "Dated tag: ${vars[IMAGE_TAG]}-$(date -u +%Y%m%d)"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache
+          sudo apt-get clean
+          echo "Available disk space:"
+          df -h /
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./container-build
+          file: ./container-build/${{ steps.recipe.outputs.dockerfile }}
+          target: ${{ steps.recipe.outputs.target }}
+          platforms: ${{ steps.recipe.outputs.platforms }}
+          push: true
+          tags: |
+            ${{ steps.recipe.outputs.image_tag }}
+            ${{ steps.recipe.outputs.image_tag }}-${{ steps.date.outputs.suffix }}
+          build-args: ${{ steps.recipe.outputs.build_args }}
+          labels: ${{ steps.recipe.outputs.labels }}
+          no-cache: ${{ inputs.no-cache == true }}
+          cache-from: type=registry,ref=${{ steps.recipe.outputs.image_tag }}-buildcache
+          cache-to: type=registry,ref=${{ steps.recipe.outputs.image_tag }}-buildcache,mode=max
