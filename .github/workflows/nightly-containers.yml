@@ -1,9 +1,9 @@
 name: Nightly Container Builds
 
 on:
-  schedule:
-    # Run daily at 6:00 AM UTC
-    - cron: '0 6 * * *'
+  #  schedule:
+  #    # Run daily at 6:00 AM UTC
+  #    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       recipe:

@@ -61,7 +61,7 @@ All vLLM images:
     - FlashInfer 0.6.3
 
 - `scitrera/dgx-spark-vllm:0.16.0-t5`
-    - Same as above, but with **Transformers 5.1.0**
+    - Same as above, but with **Transformers 5.2.0**
 
 ##### vLLM 0.15.1
 
@@ -113,7 +113,7 @@ SGLang images are also optimized for DGX Spark and provide an alternative high-p
     - FlashInfer 0.6.3
 
 - `scitrera/dgx-spark-sglang:0.5.8-t5`
-    - Same as above, but with **Transformers 5.1.0**
+    - Same as above, but with **Transformers 5.2.0**
 
 ---
 
