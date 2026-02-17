@@ -58,7 +58,6 @@ RUN if echo "${LLAMACPP_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
 WORKDIR /build/llama.cpp
 
 # Build with CUDA support targeting DGX Spark (SM 121 / Blackwell)
-# TODO: GGML_CUDA_FA_ALL_QUANTS
 RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     cmake -B build \
         -DGGML_CUDA=ON \
