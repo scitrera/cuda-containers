@@ -3,7 +3,7 @@
 https://github.com/scitrera/cuda-containers
 
 This repository contains Dockerfiles and build recipes for CUDA-based containers optimized for **NVIDIA DGX Spark**
-systems, with a focus on **vLLM**, **sglang**, **PyTorch**, and multi-node inference workloads.
+systems, with a focus on **vLLM**, **sglang**, **llama.cpp**, **PyTorch**, and multi-node inference workloads.
 
 The primary goal of this project is to provide **stable, well-versioned, prebuilt images** that work out-of-the-box on
 DGX Spark (Blackwell-ready), while still being suitable as **base images** for custom builds.
@@ -117,6 +117,27 @@ SGLang images are also optimized for DGX Spark and provide an alternative high-p
 
 ---
 
+### llama.cpp Images
+
+llama.cpp images provide a lightweight, self-contained C++ inference runtime for GGUF models on DGX Spark — no
+Python or PyTorch required. Built directly from source with CUDA support.
+
+- Are hosted on Docker
+  Hub: [https://hub.docker.com/r/scitrera/dgx-spark-llama-cpp](https://hub.docker.com/r/scitrera/dgx-spark-llama-cpp)
+
+#### Latest Releases
+
+##### llama.cpp b8076
+
+- `scitrera/dgx-spark-llama-cpp:b8076-cu131`
+    - llama.cpp build 8076
+    - CUDA 13.1.1
+    - Built on `nvidia/cuda:13.1.1-devel-ubuntu24.04`
+    - Includes llama-server, llama-cli, llama-quantize, and all standard tools
+    - GGML CUDA and RPC backends enabled
+
+---
+
 ### PyTorch Development Base Image
 
 If you want to build your own inference stack:
@@ -147,16 +168,24 @@ This is the recommended base image if you want to:
 
 Tags follow this pattern for vLLM and SGLang containers:
 
-````
-
+```
 <version>-t<transformers-major>
-
-````
+```
 
 Examples:
 
 - `0.13.0-t4` → vLLM 0.13.0 + Transformers 4.x
 - `0.5.8-t5` → SGLang 0.5.8 + Transformers 5.x
+
+For llama.cpp containers:
+
+```
+b<build-number>-cu<cuda-short>
+```
+
+Examples:
+
+- `b8076-cu131` → llama.cpp build 8076 + CUDA 13.1.1
 
 ---
 
@@ -191,6 +220,36 @@ docker run \
     --model-path Qwen/Qwen2.5-7B-Instruct \
     --mem-fraction-static 0.4
 ````
+
+---
+
+## Example Usage (llama.cpp)
+
+```bash
+docker run \
+  --privileged \
+  --gpus all \
+  -it --rm \
+  --network host --ipc=host \
+  -v ~/models:/models \
+  scitrera/dgx-spark-llama-cpp:b8076-cu131 \
+  --model /models/my-model.gguf \
+  --host 0.0.0.0 --port 8080
+```
+
+To use the CLI instead of the server:
+
+```bash
+docker run \
+  --privileged \
+  --gpus all \
+  -it --rm \
+  --entrypoint llama-cli \
+  -v ~/models:/models \
+  scitrera/dgx-spark-llama-cpp:b8076-cu131 \
+  -m /models/my-model.gguf \
+  -p "Hello, world!" -n 128
+```
 
 ---
 

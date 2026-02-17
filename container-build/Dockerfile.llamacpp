@@ -1,0 +1,94 @@
+# Global Build Arguments
+ARG CUDA_VERSION="13.1.1"
+ARG UBUNTU_VERSION="24.04"
+ARG BUILD_JOBS=8
+ARG LLAMACPP_VERSION=""
+ARG LLAMACPP_REF="master"
+ARG CUDA_ARCHITECTURES="121"
+
+# Stage 1: Build llama.cpp from source
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
+
+ARG BUILD_JOBS=8
+ARG LLAMACPP_VERSION
+ARG LLAMACPP_REF
+ARG CUDA_ARCHITECTURES="121"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CCACHE_DIR=/root/.ccache \
+    CCACHE_MAXSIZE=10G \
+    CCACHE_COMPRESS=1 \
+    CMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    CMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+    PATH=/usr/lib/ccache:$PATH \
+    CUDA_HOME=/usr/local/cuda \
+    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+    LIBRARY_PATH=/usr/local/cuda/lib64/stubs:$LIBRARY_PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda-13/compat:$LD_LIBRARY_PATH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake \
+        build-essential \
+        ninja-build \
+        git \
+        ccache \
+        curl \
+        libcurl4-openssl-dev \
+        libcudnn9-cuda-13 \
+        libibverbs1 \
+        rdma-core \
+        numactl \
+        openmpi-common \
+        openmpi-bin && \
+    ln -s /usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/openmpi /opt/openmpi \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Clone llama.cpp; LLAMACPP_REF supports branch, tag, or full commit SHA
+# If LLAMACPP_VERSION is set (e.g. "5060"), the default REF becomes "b5060"
+RUN if echo "${LLAMACPP_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
+        git clone https://github.com/ggml-org/llama.cpp.git && \
+        cd llama.cpp && \
+        git checkout "${LLAMACPP_REF}"; \
+    else \
+        git clone -b "${LLAMACPP_REF}" --depth 1 https://github.com/ggml-org/llama.cpp.git; \
+    fi
+
+WORKDIR /build/llama.cpp
+
+# Build with CUDA support targeting DGX Spark (SM 121 / Blackwell)
+# TODO: GGML_CUDA_FA_ALL_QUANTS
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    cmake -B build \
+        -DGGML_CUDA=ON \
+        -DGGML_RPC=ON \
+        -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} \
+        -DLLAMA_CURL=ON \
+        -DGGML_CUDA_FA_ALL_QUANTS=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -G Ninja && \
+    cmake --build build --config Release -j${BUILD_JOBS}
+
+# Install to a clean prefix for easy copying
+RUN cmake --install build --prefix /opt/llamacpp
+
+# Stage 2: Runtime image (minimal, CUDA runtime only)
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libcurl4 \
+        libgomp1 \
+        curl \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Copy built binaries and libraries from builder
+COPY --from=builder /opt/llamacpp /usr/local
+
+WORKDIR /data
+ENV PATH=/usr/local/bin:$PATH
+
+#ENTRYPOINT ["llama-server"]
+#CMD ["--help"]

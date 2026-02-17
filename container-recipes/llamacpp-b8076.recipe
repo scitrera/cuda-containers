@@ -1,0 +1,13 @@
+DOCKERFILE=Dockerfile.llamacpp
+TARGET=runtime
+
+CUDA_VERSION=13.1.1
+BUILD_JOBS=8
+CUDA_ARCHITECTURES=121
+
+# llama.cpp uses "b<number>" tags, e.g. b5700
+# Set LLAMACPP_VERSION to the build number and LLAMACPP_REF defaults to "b<number>"
+LLAMACPP_VERSION=8076
+#LLAMACPP_REF=master
+
+IMAGE_TAG=scitrera/dgx-spark-llama-cpp:b8076-cu131
