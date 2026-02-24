@@ -4,13 +4,13 @@ TARGET=sglang_runtime
 DEV_BASE_IMAGE=scitrera/dgx-spark-pytorch-dev:2.10.0-v2-cu131
 RUN_BASE_IMAGE=scitrera/dgx-spark-pytorch-runtime:2.10.0-v2-cu131
 
-FLASHINFER_VERSION=0.6.3
+FLASHINFER_VERSION=0.6.4
 TRITON_VERSION=3.6.0
 
 TRANSFORMERS_VERSION=5.2.0
 #TRANSFORMERS_REF=""
 
-SGLANG_VERSION=0.5.9+git-2f592c3b
-SGLANG_REF="2f592c3b181b7d75dbab8cc8f95806ee78e6ff01"
+SGLANG_VERSION=0.5.9+git-9fac90d8
+SGLANG_REF="9fac90d85d9507d1f63cbc6192da5a560b00241a"
 
-IMAGE_TAG=scitrera/dgx-spark-sglang:0.5.9-dev-2f592c3b-t5
+IMAGE_TAG=scitrera/dgx-spark-sglang:0.5.9-dev-9fac90d8-t5
