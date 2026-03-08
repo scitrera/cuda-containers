@@ -1,5 +1,5 @@
 DOCKERFILE=Dockerfile.llm_inference
-TARGET=sglang_runtime
+TARGET=vllm_runtime
 
 DEV_BASE_IMAGE=scitrera/dgx-spark-pytorch-dev:2.10.0-v2-cu131
 RUN_BASE_IMAGE=scitrera/dgx-spark-pytorch-runtime:2.10.0-v2-cu131
@@ -7,10 +7,9 @@ RUN_BASE_IMAGE=scitrera/dgx-spark-pytorch-runtime:2.10.0-v2-cu131
 FLASHINFER_VERSION=0.6.5
 TRITON_VERSION=3.6.0
 
-TRANSFORMERS_VERSION=5.3.0
+TRANSFORMERS_VERSION=4.57.6
 #TRANSFORMERS_REF=""
 
-SGLANG_VERSION=0.5.9
-#SGLANG_REF=""
+VLLM_VERSION=0.17.0
 
-IMAGE_TAG=scitrera/dgx-spark-sglang:0.5.9-t5
+IMAGE_TAG=scitrera/dgx-spark-vllm:0.17.0-t4
