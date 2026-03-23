@@ -1,0 +1,237 @@
+name: llama.cpp Release Tracker
+
+on:
+  schedule:
+    # Check for new releases every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Force-build a specific bNNNN version (e.g. "b8192"). Leave blank to auto-detect latest.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: llamacpp-release-tracker
+  cancel-in-progress: false
+
+jobs:
+  check-release:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      new_version: ${{ steps.compare.outputs.new_version }}
+      new_ref: ${{ steps.compare.outputs.new_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get latest upstream release tag
+        id: upstream
+        run: |
+          if [[ -n "${{ inputs.version }}" ]]; then
+            # Manual override: use provided version
+            TAG="${{ inputs.version }}"
+            # Strip leading 'b' if present to normalize
+            VERSION="${TAG#b}"
+            TAG="b${VERSION}"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "Manual override: ${TAG} (version ${VERSION})"
+          else
+            # Auto-detect: query GitHub API for latest bNNNN tag
+            LATEST_TAG=$(curl -sf "https://api.github.com/repos/ggml-org/llama.cpp/tags?per_page=100" \
+              | jq -r '.[].name' \
+              | grep -E '^b[0-9]+$' \
+              | sort -t'b' -k2 -n \
+              | tail -1)
+
+            if [[ -z "$LATEST_TAG" ]]; then
+              echo "::error::Failed to detect latest llama.cpp tag"
+              exit 1
+            fi
+
+            VERSION="${LATEST_TAG#b}"
+            echo "tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "Latest upstream tag: ${LATEST_TAG} (version ${VERSION})"
+          fi
+
+      - name: Get current version from recipe
+        id: current
+        run: |
+          # Find the current llamacpp recipe (non-archived)
+          RECIPE=$(ls container-recipes/llamacpp-b*.recipe 2>/dev/null | head -1 || true)
+          if [[ -n "$RECIPE" ]]; then
+            CURRENT=$(grep '^LLAMACPP_VERSION=' "$RECIPE" | head -1 | cut -d= -f2)
+            echo "version=${CURRENT}" >> "$GITHUB_OUTPUT"
+            echo "Current version: ${CURRENT} (from ${RECIPE})"
+          else
+            echo "version=0" >> "$GITHUB_OUTPUT"
+            echo "No existing recipe found"
+          fi
+
+      - name: Compare versions
+        id: compare
+        run: |
+          UPSTREAM="${{ steps.upstream.outputs.version }}"
+          CURRENT="${{ steps.current.outputs.version }}"
+
+          if [[ -n "${{ inputs.version }}" ]]; then
+            # Manual trigger always builds
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "Manual trigger: will build b${UPSTREAM}"
+          elif [[ "$UPSTREAM" -gt "$CURRENT" ]]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "New version available: b${UPSTREAM} > b${CURRENT}"
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "Already up to date: b${CURRENT} >= b${UPSTREAM}"
+          fi
+
+          echo "new_version=${UPSTREAM}" >> "$GITHUB_OUTPUT"
+          echo "new_ref=b${UPSTREAM}" >> "$GITHUB_OUTPUT"
+
+  build-and-publish:
+    needs: check-release
+    if: needs.check-release.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse parameters file
+        id: params
+        run: |
+          PARAMS_FILE="container-recipes/llamacpp.parameters"
+          if [[ ! -f "$PARAMS_FILE" ]]; then
+            echo "::error::Parameters file not found: ${PARAMS_FILE}"
+            exit 1
+          fi
+
+          while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$key" ]] && continue
+            key=$(echo "$key" | xargs)
+            value=$(echo "$value" | xargs)
+            [[ -z "$key" ]] && continue
+            echo "${key}=${value}" >> "$GITHUB_OUTPUT"
+          done < "$PARAMS_FILE"
+
+          echo "Parameters loaded from ${PARAMS_FILE}"
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          VERSION="${{ needs.check-release.outputs.new_version }}"
+          REF="${{ needs.check-release.outputs.new_ref }}"
+          CUDA_VERSION="${{ steps.params.outputs.CUDA_VERSION }}"
+
+          # Derive CUDA_SHORT: major+minor digits without dots (e.g. 13.1.1 -> 131)
+          CUDA_SHORT=$(echo "$CUDA_VERSION" | cut -d. -f1,2 | tr -d '.')
+
+          IMAGE_TAG="scitrera/dgx-spark-llama-cpp:${REF}-cu${CUDA_SHORT}"
+
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "cuda_short=${CUDA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: ${IMAGE_TAG}"
+
+      - name: Generate recipe file
+        id: recipe
+        run: |
+          VERSION="${{ needs.check-release.outputs.new_version }}"
+          REF="${{ needs.check-release.outputs.new_ref }}"
+          IMAGE_TAG="${{ steps.tag.outputs.image_tag }}"
+          RECIPE_FILE="container-recipes/llamacpp-${REF}.recipe"
+
+          cat > "$RECIPE_FILE" <<EOF
+          DOCKERFILE=${{ steps.params.outputs.DOCKERFILE }}
+          TARGET=${{ steps.params.outputs.TARGET }}
+
+          CUDA_VERSION=${{ steps.params.outputs.CUDA_VERSION }}
+          BUILD_JOBS=${{ steps.params.outputs.BUILD_JOBS }}
+          CUDA_ARCHITECTURES=${{ steps.params.outputs.CUDA_ARCHITECTURES }}
+
+          # llama.cpp uses "b<number>" tags, e.g. b5700
+          # Set LLAMACPP_VERSION to the build number and LLAMACPP_REF defaults to "b<number>"
+          LLAMACPP_VERSION=${VERSION}
+          LLAMACPP_REF=${REF}
+
+          IMAGE_TAG=${IMAGE_TAG}
+          EOF
+
+          # Remove leading whitespace from heredoc indentation
+          sed -i 's/^          //' "$RECIPE_FILE"
+
+          echo "recipe_file=${RECIPE_FILE}" >> "$GITHUB_OUTPUT"
+          echo "Generated recipe:"
+          cat "$RECIPE_FILE"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache
+          sudo apt-get clean
+          echo "Available disk space:"
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./container-build
+          file: ./container-build/${{ steps.params.outputs.DOCKERFILE }}
+          target: ${{ steps.params.outputs.TARGET }}
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ steps.tag.outputs.image_tag }}
+            scitrera/dgx-spark-llama-cpp:latest
+          build-args: |
+            CUDA_VERSION=${{ steps.params.outputs.CUDA_VERSION }}
+            BUILD_JOBS=${{ steps.params.outputs.BUILD_JOBS }}
+            CUDA_ARCHITECTURES=${{ steps.params.outputs.CUDA_ARCHITECTURES }}
+            LLAMACPP_VERSION=${{ needs.check-release.outputs.new_version }}
+            LLAMACPP_REF=${{ needs.check-release.outputs.new_ref }}
+          labels: |
+            maintainer=scitrera.ai <open-source-team@scitrera.com>
+            dev.scitrera.llamacpp_version=${{ needs.check-release.outputs.new_version }}
+            dev.scitrera.cuda_version=${{ steps.params.outputs.CUDA_VERSION }}
+          cache-from: type=registry,ref=scitrera/dgx-spark-llama-cpp:buildcache
+          cache-to: type=registry,ref=scitrera/dgx-spark-llama-cpp:buildcache,mode=max
+
+      - name: Archive old recipe and commit new one
+        run: |
+          VERSION="${{ needs.check-release.outputs.new_version }}"
+          REF="${{ needs.check-release.outputs.new_ref }}"
+          RECIPE_FILE="${{ steps.recipe.outputs.recipe_file }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Ensure archive directory exists
+          mkdir -p container-recipes/archive
+
+          # Move old llamacpp recipes to archive (excluding the new one)
+          for old_recipe in container-recipes/llamacpp-b*.recipe; do
+            [[ "$old_recipe" == "$RECIPE_FILE" ]] && continue
+            [[ -f "$old_recipe" ]] || continue
+            git mv "$old_recipe" container-recipes/archive/
+          done
+
+          # Stage the new recipe
+          git add "$RECIPE_FILE"
+          git add container-recipes/archive/
+
+          # Commit and push
+          git commit -m "feat: auto-update llama.cpp to ${REF}"
+          git push

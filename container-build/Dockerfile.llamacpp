@@ -64,6 +64,7 @@ RUN --mount=type=cache,id=ccache,target=/root/.ccache \
         -DGGML_CUDA=ON \
         -DGGML_RPC=ON \
         -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} \
+        -DGGML_NATIVE=OFF \
         -DLLAMA_CURL=ON \
         -DLLAMA_OPENSSL=ON \
         -DGGML_CUDA_FA_ALL_QUANTS=ON \

@@ -1,0 +1,7 @@
+# Shared parameters for llama.cpp recipe generation
+# Update these when base infrastructure changes (e.g. CUDA upgrade)
+DOCKERFILE=Dockerfile.llamacpp
+TARGET=runtime
+CUDA_VERSION=13.1.1
+BUILD_JOBS=4
+CUDA_ARCHITECTURES=121
