@@ -41,22 +41,19 @@ jobs:
             echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
             echo "Manual override: ${TAG} (version ${VERSION})"
           else
-            # Auto-detect: query GitHub API for latest bNNNN tag
-            LATEST_TAG=$(curl -sf "https://api.github.com/repos/ggml-org/llama.cpp/tags?per_page=100" \
-              | jq -r '.[].name' \
-              | grep -E '^b[0-9]+$' \
-              | sort -t'b' -k2 -n \
-              | tail -1)
+            # Auto-detect: query GitHub releases API for latest bNNNN release
+            LATEST_TAG=$(curl -sf "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest" \
+              | jq -r '.tag_name')
 
-            if [[ -z "$LATEST_TAG" ]]; then
-              echo "::error::Failed to detect latest llama.cpp tag"
+            if [[ -z "$LATEST_TAG" || "$LATEST_TAG" == "null" ]]; then
+              echo "::error::Failed to detect latest llama.cpp release"
               exit 1
             fi
 
             VERSION="${LATEST_TAG#b}"
             echo "tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
             echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-            echo "Latest upstream tag: ${LATEST_TAG} (version ${VERSION})"
+            echo "Latest upstream release: ${LATEST_TAG} (version ${VERSION})"
           fi
 
       - name: Get current version from recipe
