@@ -3,7 +3,7 @@
 DOCKERFILE=Dockerfile.sglang-nightly
 TARGET=runtime
 BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3
-BUILD_JOBS=2
+BUILD_JOBS=1
 CUDA_ARCHITECTURES=121
 TORCH_CUDA_ARCH_LIST=12.1a
 NVCC_GENCODE=-gencode=arch=compute_121,code=sm_121

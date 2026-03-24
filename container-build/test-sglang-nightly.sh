@@ -9,6 +9,11 @@ set -euo pipefail
 #   ./test-sglang-nightly.sh wheels             # build wheels target
 #   SGLANG_REF=v0.5.9 ./test-sglang-nightly.sh # override ref
 #   BUILD_JOBS=4 ./test-sglang-nightly.sh       # override parallelism
+#
+# sgl-kernel wheel reuse:
+#   Place a pre-built sgl_kernel-*.whl in wheel-cache/ to skip the expensive
+#   CUDA compilation. The Dockerfile uses it automatically if present.
+#   Clear wheel-cache/ (except .gitkeep) to force a rebuild.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTEXT_DIR="${SCRIPT_DIR}"
@@ -52,6 +57,9 @@ echo "FlashInfer version: ${FLASHINFER_VERSION:-<sglang default>}"
 echo "Transformers:       ${TRANSFORMERS_VERSION:-<sglang default>}"
 echo "Target:             ${TARGET}"
 echo ""
+
+# Ensure wheel-cache exists (Dockerfile COPYs it; may be empty)
+mkdir -p "${CONTEXT_DIR}/wheel-cache"
 
 docker buildx build \
     --file "${CONTEXT_DIR}/Dockerfile.sglang-nightly" \

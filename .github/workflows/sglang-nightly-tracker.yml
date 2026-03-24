@@ -41,6 +41,9 @@ jobs:
       nightly_short_sha: ${{ steps.compare.outputs.nightly_short_sha }}
       nightly_version: ${{ steps.compare.outputs.nightly_version }}
       date_tag: ${{ steps.compare.outputs.date_tag }}
+      sgl_kernel_tree_sha_release: ${{ steps.compare.outputs.sgl_kernel_tree_sha_release }}
+      sgl_kernel_tree_sha_nightly: ${{ steps.compare.outputs.sgl_kernel_tree_sha_nightly }}
+      prev_sgl_kernel_tree_sha: ${{ steps.compare.outputs.prev_sgl_kernel_tree_sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -89,6 +92,21 @@ jobs:
           echo "main_version=${MAIN_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Nightly base version: ${MAIN_VERSION} (from latest release)"
 
+          # Get sgl-kernel tree SHA for both release and nightly refs (for wheel reuse detection)
+          # Use the release tag if available, otherwise fall back to main SHA
+          for ref_label_ref in "release:${RELEASE_TAG:-}" "nightly:${MAIN_SHA:-}"; do
+            label="${ref_label_ref%%:*}"
+            ref="${ref_label_ref#*:}"
+            if [[ -n "$ref" ]]; then
+              TREE_JSON=$(curl -sf "https://api.github.com/repos/sgl-project/sglang/git/trees/${ref}" || echo '{}')
+              SKT_SHA=$(echo "$TREE_JSON" | jq -r '.tree[] | select(.path == "sgl-kernel") | .sha // empty')
+              echo "sgl_kernel_tree_sha_${label}=${SKT_SHA}" >> "$GITHUB_OUTPUT"
+              echo "sgl-kernel tree SHA (${label}): ${SKT_SHA}"
+            else
+              echo "sgl_kernel_tree_sha_${label}=" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
       - name: Get current tracked versions
         id: current
         run: |
@@ -113,6 +131,19 @@ jobs:
             echo "nightly_sha=" >> "$GITHUB_OUTPUT"
             echo "No existing nightly recipe found"
           fi
+
+          # Check previous sgl-kernel tree SHA from any existing recipe
+          PREV_SKT=""
+          for recipe in container-recipes/sglang-nightly-main-*.recipe container-recipes/sglang-nightly-v*.recipe; do
+            [[ -f "$recipe" ]] || continue
+            val=$(grep '^SGL_KERNEL_TREE_SHA=' "$recipe" | head -1 | cut -d= -f2)
+            if [[ -n "$val" ]]; then
+              PREV_SKT="$val"
+              break
+            fi
+          done
+          echo "prev_sgl_kernel_tree_sha=${PREV_SKT}" >> "$GITHUB_OUTPUT"
+          echo "Previous sgl-kernel tree SHA: ${PREV_SKT:-none}"
 
       - name: Compare and decide what to build
         id: compare
@@ -194,6 +225,11 @@ jobs:
           echo "nightly_short_sha=${NIGHTLY_SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "nightly_version=${NIGHTLY_VERSION}" >> "$GITHUB_OUTPUT"
 
+          # Pass through sgl-kernel tree SHAs for wheel reuse detection
+          echo "sgl_kernel_tree_sha_release=${{ steps.upstream.outputs.sgl_kernel_tree_sha_release }}" >> "$GITHUB_OUTPUT"
+          echo "sgl_kernel_tree_sha_nightly=${{ steps.upstream.outputs.sgl_kernel_tree_sha_nightly }}" >> "$GITHUB_OUTPUT"
+          echo "prev_sgl_kernel_tree_sha=${{ steps.current.outputs.prev_sgl_kernel_tree_sha }}" >> "$GITHUB_OUTPUT"
+
   build-release:
     needs: check-updates
     if: needs.check-updates.outputs.build_release == 'true'
@@ -242,6 +278,7 @@ jobs:
           TRANSFORMERS_VERSION=${{ steps.params.outputs.TRANSFORMERS_VERSION }}
           SGLANG_VERSION=${VERSION}
           SGLANG_REF=${REF}
+          SGL_KERNEL_TREE_SHA=${{ needs.check-updates.outputs.sgl_kernel_tree_sha_release }}
           IMAGE_TAG=${IMAGE_TAG}
           EOF
 
@@ -275,6 +312,40 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check sgl-kernel wheel reuse
+        id: sgl_kernel
+        run: |
+          SKT_SHA="${{ needs.check-updates.outputs.sgl_kernel_tree_sha_release }}"
+          PREV_SKT_SHA="${{ needs.check-updates.outputs.prev_sgl_kernel_tree_sha }}"
+          WHEEL_CACHE="./container-build/wheel-cache"
+          mkdir -p "$WHEEL_CACHE"
+
+          if [[ -n "$SKT_SHA" && -n "$PREV_SKT_SHA" && "$SKT_SHA" == "$PREV_SKT_SHA" ]]; then
+            echo "sgl-kernel unchanged (tree SHA: ${SKT_SHA}), extracting pre-built wheel..."
+            CARRIER="ghcr.io/scitrera/sglang-nightly-wheels:latest"
+            CID=$(docker create --platform linux/arm64 "$CARRIER" 2>/dev/null || echo "")
+            if [[ -n "$CID" ]]; then
+              docker cp "${CID}:/wheels/" /tmp/carrier-wheels/ 2>/dev/null || true
+              docker rm "$CID" >/dev/null 2>&1 || true
+              if ls /tmp/carrier-wheels/sgl_kernel-*.whl 1>/dev/null 2>&1; then
+                cp /tmp/carrier-wheels/sgl_kernel-*.whl "$WHEEL_CACHE/"
+                echo "reused=true" >> "$GITHUB_OUTPUT"
+                echo "Pre-built sgl-kernel wheel cached:"
+                ls -la "$WHEEL_CACHE"/sgl_kernel-*.whl
+              else
+                echo "reused=false" >> "$GITHUB_OUTPUT"
+                echo "No sgl-kernel wheel found in carrier, will build from source"
+              fi
+              rm -rf /tmp/carrier-wheels
+            else
+              echo "reused=false" >> "$GITHUB_OUTPUT"
+              echo "Could not pull carrier image, will build from source"
+            fi
+          else
+            echo "reused=false" >> "$GITHUB_OUTPUT"
+            echo "sgl-kernel changed (${PREV_SKT_SHA:-none} -> ${SKT_SHA:-unknown}), will build from source"
+          fi
 
       - name: Build and push runtime image
         uses: docker/build-push-action@v6
@@ -427,6 +498,7 @@ jobs:
           SGLANG_VERSION=${VERSION}-git${SHORT_SHA}
           SGLANG_REF=${FULL_SHA}
           SGLANG_SHA=${FULL_SHA}
+          SGL_KERNEL_TREE_SHA=${{ needs.check-updates.outputs.sgl_kernel_tree_sha_nightly }}
           IMAGE_TAG=${IMAGE_TAG}
           EOF
 
@@ -460,6 +532,41 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check sgl-kernel wheel reuse
+        id: sgl_kernel
+        run: |
+          SKT_SHA="${{ needs.check-updates.outputs.sgl_kernel_tree_sha_nightly }}"
+          PREV_SKT_SHA="${{ needs.check-updates.outputs.prev_sgl_kernel_tree_sha }}"
+          WHEEL_CACHE="./container-build/wheel-cache"
+          mkdir -p "$WHEEL_CACHE"
+
+          if [[ -n "$SKT_SHA" && -n "$PREV_SKT_SHA" && "$SKT_SHA" == "$PREV_SKT_SHA" ]]; then
+            echo "sgl-kernel unchanged (tree SHA: ${SKT_SHA}), extracting pre-built wheel..."
+            # Create a temporary container from the latest wheel carrier to extract the wheel
+            CARRIER="ghcr.io/scitrera/sglang-nightly-wheels:latest"
+            CID=$(docker create --platform linux/arm64 "$CARRIER" 2>/dev/null || echo "")
+            if [[ -n "$CID" ]]; then
+              docker cp "${CID}:/wheels/" /tmp/carrier-wheels/ 2>/dev/null || true
+              docker rm "$CID" >/dev/null 2>&1 || true
+              if ls /tmp/carrier-wheels/sgl_kernel-*.whl 1>/dev/null 2>&1; then
+                cp /tmp/carrier-wheels/sgl_kernel-*.whl "$WHEEL_CACHE/"
+                echo "reused=true" >> "$GITHUB_OUTPUT"
+                echo "Pre-built sgl-kernel wheel cached:"
+                ls -la "$WHEEL_CACHE"/sgl_kernel-*.whl
+              else
+                echo "reused=false" >> "$GITHUB_OUTPUT"
+                echo "No sgl-kernel wheel found in carrier image, will build from source"
+              fi
+              rm -rf /tmp/carrier-wheels
+            else
+              echo "reused=false" >> "$GITHUB_OUTPUT"
+              echo "Could not pull carrier image, will build from source"
+            fi
+          else
+            echo "reused=false" >> "$GITHUB_OUTPUT"
+            echo "sgl-kernel changed (${PREV_SKT_SHA:-none} -> ${SKT_SHA:-unknown}), will build from source"
+          fi
 
       - name: Build and push runtime image
         uses: docker/build-push-action@v6

@@ -88,18 +88,27 @@ RUN if [ -n "${SGLANG_VERSION}" ]; then \
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv pip install --no-build-isolation --no-deps ./python
 
-# Build sgl-kernel: install build deps then build wheel
+# Copy any pre-built sgl-kernel wheels from build context (may be empty)
+COPY wheel-cache/ /data/wheel-cache/
+
+# Build sgl-kernel: use pre-built wheel if available, otherwise build from source
 RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    cd sgl-kernel && \
-    make install-deps && \
     mkdir -p /data/wheels && \
-    uv build --wheel \
-      -Cbuild-dir=build \
-      "-Cbuild.tool-args=-j${MAX_JOBS}" \
-      -Ccmake.args=-DSGL_KERNEL_COMPILE_THREADS=1 \
-      --out-dir=/data/wheels \
-      . --verbose --no-build-isolation
+    if ls /data/wheel-cache/sgl_kernel-*.whl 1>/dev/null 2>&1; then \
+        echo "=== Using pre-built sgl-kernel wheel ===" && \
+        cp /data/wheel-cache/sgl_kernel-*.whl /data/wheels/; \
+    else \
+        echo "=== Building sgl-kernel from source ===" && \
+        cd sgl-kernel && \
+        make install-deps && \
+        uv build --wheel \
+          -Cbuild-dir=build \
+          "-Cbuild.tool-args=-j${MAX_JOBS}" \
+          -Ccmake.args=-DSGL_KERNEL_COMPILE_THREADS=1 \
+          --out-dir=/data/wheels \
+          . --verbose --no-build-isolation; \
+    fi
 
 # Build sglang wheel
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
