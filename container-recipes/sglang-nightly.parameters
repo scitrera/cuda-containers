@@ -1,0 +1,11 @@
+# Shared parameters for SGLang nightly recipe generation
+# Update these when base infrastructure changes (e.g. NVCR image upgrade)
+DOCKERFILE=Dockerfile.sglang-nightly
+TARGET=runtime
+BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3
+BUILD_JOBS=2
+CUDA_ARCHITECTURES=121
+TORCH_CUDA_ARCH_LIST=12.1a
+NVCC_GENCODE=-gencode=arch=compute_121,code=sm_121
+FLASHINFER_VERSION=
+TRANSFORMERS_VERSION=
