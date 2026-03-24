@@ -78,11 +78,16 @@ jobs:
             echo "main_short_sha=" >> "$GITHUB_OUTPUT"
           fi
 
-          # Extract version from pyproject.toml on main
-          PYPROJECT=$(curl -sf "https://raw.githubusercontent.com/sgl-project/sglang/main/python/pyproject.toml" || echo '')
-          MAIN_VERSION=$(echo "$PYPROJECT" | grep -m1 '^version' | sed 's/version *= *"\(.*\)"/\1/')
+          # TODO: refine version tracking to track latest in case they e.g. switch to pre-bumping version
+          # Derive nightly base version from latest release tag
+          # (sglang uses setuptools-scm, so pyproject.toml has no static version)
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            MAIN_VERSION="${RELEASE_VERSION}"
+          else
+            MAIN_VERSION="0.0.0"
+          fi
           echo "main_version=${MAIN_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Main branch version: ${MAIN_VERSION}"
+          echo "Nightly base version: ${MAIN_VERSION} (from latest release)"
 
       - name: Get current tracked versions
         id: current
