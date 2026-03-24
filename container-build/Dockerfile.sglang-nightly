@@ -20,8 +20,25 @@ ARG TRANSFORMERS_VERSION=""
 ARG TRANSFORMERS_REF=""
 ARG TRANSFORMERS_PRE=0
 
-RUN apt-get update && apt-get install -y --no-install-recommends ccache && \
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --allow-change-held-packages --no-install-recommends \
+        python3-pip \
+        python3-dev \
+        git \
+        wget \
+        ccache \
+        libcudnn9-cuda-13 \
+        libibverbs1 \
+        rdma-core \
+        numactl \
+        openmpi-common \
+        openmpi-bin && \
+    ln -s /usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/openmpi /opt/openmpi && \
     rm -rf /var/lib/apt/lists/*
+
+ENV MPI_HOME=/opt/openmpi
+
+RUN pip install uv
 
 ENV MAX_JOBS=${BUILD_JOBS} \
     CUDA_HOME=/usr/local/cuda \
@@ -58,35 +75,44 @@ RUN if [ -n "${SGLANG_VERSION}" ]; then \
         fi; \
     fi
 
-# Install sglang package (no deps, no build isolation since NVCR has torch)
-RUN pip install --no-build-isolation --no-deps ./python
+# Install sglang package (no deps, no build isolation since base has torch)
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install --no-build-isolation --no-deps ./python
 
 # Build sgl-kernel: install build deps then build wheel
 RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     cd sgl-kernel && \
     make install-deps && \
     mkdir -p /data/wheels && \
-    pip wheel --no-build-isolation --no-deps -w /data/wheels -v \
-      --config-settings=build-dir=build \
-      --config-settings=build.tool-args=-j${MAX_JOBS} \
-      --config-settings=cmake.args=-DSGL_KERNEL_COMPILE_THREADS=1 \
-      .
+    uv build --wheel \
+      -Cbuild-dir=build \
+      "-Cbuild.tool-args=-j${MAX_JOBS}" \
+      -Ccmake.args=-DSGL_KERNEL_COMPILE_THREADS=1 \
+      --out-dir=/data/wheels \
+      . --verbose --no-build-isolation
 
 # Build sglang wheel
-RUN pip wheel --no-build-isolation --no-deps -w /data/wheels ./python
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    mkdir -p /data/wheels && \
+    uv build --wheel --no-build-isolation --no-index \
+      --out-dir=/data/wheels ./python
 
 # Install sgl-kernel from the wheel we just built
-RUN pip install /data/wheels/sgl_kernel-*.whl --no-deps
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install /data/wheels/sgl_kernel-*.whl --no-deps
 
 # Optional: install specific FlashInfer version from wheels index (skip if blank)
-RUN if [ -n "$FLASHINFER_VERSION" ]; then \
-        pip install --pre flashinfer-python==${FLASHINFER_VERSION} --no-deps --index-url https://flashinfer.ai/whl && \
-        pip install --pre flashinfer-cubin==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl && \
-        pip install --pre flashinfer-jit-cache==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl/cu130; \
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    if [ -n "$FLASHINFER_VERSION" ]; then \
+        uv pip install --pre flashinfer-python==${FLASHINFER_VERSION} --no-deps --index-url https://flashinfer.ai/whl && \
+        uv pip install --pre flashinfer-cubin==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl && \
+        uv pip install --pre flashinfer-jit-cache==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl/cu130; \
     fi
 
 # Install remaining deps: xgrammar, fastsafetensors, ray, numba, grpcio-tools, multimodal support
-RUN pip install \
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install \
         packaging \
         xgrammar \
         fastsafetensors \
@@ -97,7 +123,8 @@ RUN pip install \
 
 # Resolve any missing deps declared in sglang's pyproject.toml
 COPY --chmod=0755 stages/missing_deps.py /opt/missing_deps.py
-RUN cd /data/sglang/python && \
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    cd /data/sglang/python && \
         /opt/missing_deps.py --extra diffusion \
         --ignore sgl-kernel \
         --ignore triton \
@@ -106,16 +133,17 @@ RUN cd /data/sglang/python && \
         --ignore torchvision \
         --ignore torchcodec \
         > missing_deps.txt && \
-    pip install -r missing_deps.txt && \
+    uv pip install -r missing_deps.txt && \
     rm missing_deps.txt /opt/missing_deps.py
 
 # Late transformers install if version is specified
-RUN if [ -n "$TRANSFORMERS_REF" ]; then \
-        pip install -U git+https://github.com/huggingface/transformers.git@${TRANSFORMERS_REF}; \
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    if [ -n "$TRANSFORMERS_REF" ]; then \
+        uv pip install -U git+https://github.com/huggingface/transformers.git@${TRANSFORMERS_REF}; \
     elif [ -n "$TRANSFORMERS_VERSION" ]; then \
-        pip install -U transformers==${TRANSFORMERS_VERSION} --pre; \
+        uv pip install -U transformers==${TRANSFORMERS_VERSION} --pre; \
     elif [ "$TRANSFORMERS_PRE" = "1" ]; then \
-        pip install -U transformers --pre; \
+        uv pip install -U transformers --pre; \
     fi
 
 # Break up dist-packages into smaller layers to avoid hitting Docker layer size limits
@@ -134,6 +162,26 @@ ARG TORCH_CUDA_ARCH_LIST="12.1a"
 ENV CUDA_HOME=/usr/local/cuda \
     TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+
+# runtime base installs
+RUN apt update && \
+    apt install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-dev \
+    vim \
+    curl \
+    git \
+    wget \
+    libcudnn9-cuda-13 \
+    libnccl-dev \
+    libnccl2 \
+    libibverbs1 \
+    libibverbs-dev \
+    rdma-core \
+    libxcb1 \
+    && rm -rf /var/lib/apt/lists/* && \
+    pip install uv && (pip uninstall -y flash-attn || true)
 
 # Copy Python dependencies from builder (split into 4 layers for size management)
 COPY --from=builder /usr/local/lib/python3.12/dist-packages-1/ /usr/local/lib/python3.12/dist-packages/
