@@ -1,0 +1,542 @@
+name: SGLang Nightly Tracker
+
+on:
+  schedule:
+    # Check for new releases/commits nightly at 4am UTC
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      sglang_ref:
+        description: 'Build a specific ref (tag like "v0.5.9", branch like "main", or commit SHA). Leave blank to auto-detect.'
+        required: false
+        type: string
+      skip_release_check:
+        description: 'Skip release detection (only build nightly if applicable)'
+        required: false
+        type: boolean
+        default: false
+      skip_nightly_check:
+        description: 'Skip nightly detection (only build release if applicable)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: sglang-nightly-tracker
+  cancel-in-progress: false
+
+jobs:
+  check-updates:
+    runs-on: ubuntu-latest
+    outputs:
+      build_release: ${{ steps.compare.outputs.build_release }}
+      release_version: ${{ steps.compare.outputs.release_version }}
+      release_ref: ${{ steps.compare.outputs.release_ref }}
+      build_nightly: ${{ steps.compare.outputs.build_nightly }}
+      nightly_sha: ${{ steps.compare.outputs.nightly_sha }}
+      nightly_short_sha: ${{ steps.compare.outputs.nightly_short_sha }}
+      nightly_version: ${{ steps.compare.outputs.nightly_version }}
+      date_tag: ${{ steps.compare.outputs.date_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Query upstream sglang state
+        id: upstream
+        run: |
+          DATE_TAG=$(date -u +%Y%m%d)
+          echo "date_tag=${DATE_TAG}" >> "$GITHUB_OUTPUT"
+
+          # Get latest release
+          RELEASE_JSON=$(curl -sf "https://api.github.com/repos/sgl-project/sglang/releases/latest" || echo '{}')
+          RELEASE_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+          if [[ -n "$RELEASE_TAG" ]]; then
+            RELEASE_VERSION="${RELEASE_TAG#v}"
+            echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+            echo "release_version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "Latest release: ${RELEASE_TAG} (version ${RELEASE_VERSION})"
+          else
+            echo "::warning::Could not detect latest sglang release"
+            echo "release_tag=" >> "$GITHUB_OUTPUT"
+            echo "release_version=" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Get latest main commit
+          MAIN_JSON=$(curl -sf "https://api.github.com/repos/sgl-project/sglang/commits/main" || echo '{}')
+          MAIN_SHA=$(echo "$MAIN_JSON" | jq -r '.sha // empty')
+          if [[ -n "$MAIN_SHA" ]]; then
+            MAIN_SHORT_SHA=$(echo "$MAIN_SHA" | head -c 7)
+            echo "main_sha=${MAIN_SHA}" >> "$GITHUB_OUTPUT"
+            echo "main_short_sha=${MAIN_SHORT_SHA}" >> "$GITHUB_OUTPUT"
+            echo "Latest main commit: ${MAIN_SHORT_SHA} (${MAIN_SHA})"
+          else
+            echo "::warning::Could not detect latest sglang main commit"
+            echo "main_sha=" >> "$GITHUB_OUTPUT"
+            echo "main_short_sha=" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Extract version from pyproject.toml on main
+          PYPROJECT=$(curl -sf "https://raw.githubusercontent.com/sgl-project/sglang/main/python/pyproject.toml" || echo '')
+          MAIN_VERSION=$(echo "$PYPROJECT" | grep -m1 '^version' | sed 's/version *= *"\(.*\)"/\1/')
+          echo "main_version=${MAIN_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Main branch version: ${MAIN_VERSION}"
+
+      - name: Get current tracked versions
+        id: current
+        run: |
+          # Check current release recipe
+          RELEASE_RECIPE=$(ls container-recipes/sglang-nightly-v*.recipe 2>/dev/null | head -1 || true)
+          if [[ -n "$RELEASE_RECIPE" ]]; then
+            CURRENT_RELEASE=$(grep '^SGLANG_VERSION=' "$RELEASE_RECIPE" | head -1 | cut -d= -f2)
+            echo "release_version=${CURRENT_RELEASE}" >> "$GITHUB_OUTPUT"
+            echo "Current release version: ${CURRENT_RELEASE} (from ${RELEASE_RECIPE})"
+          else
+            echo "release_version=" >> "$GITHUB_OUTPUT"
+            echo "No existing release recipe found"
+          fi
+
+          # Check current nightly recipe
+          NIGHTLY_RECIPE=$(ls container-recipes/sglang-nightly-main-*.recipe 2>/dev/null | head -1 || true)
+          if [[ -n "$NIGHTLY_RECIPE" ]]; then
+            CURRENT_SHA=$(grep '^SGLANG_SHA=' "$NIGHTLY_RECIPE" | head -1 | cut -d= -f2)
+            echo "nightly_sha=${CURRENT_SHA}" >> "$GITHUB_OUTPUT"
+            echo "Current nightly SHA: ${CURRENT_SHA} (from ${NIGHTLY_RECIPE})"
+          else
+            echo "nightly_sha=" >> "$GITHUB_OUTPUT"
+            echo "No existing nightly recipe found"
+          fi
+
+      - name: Compare and decide what to build
+        id: compare
+        run: |
+          DATE_TAG="${{ steps.upstream.outputs.date_tag }}"
+          echo "date_tag=${DATE_TAG}" >> "$GITHUB_OUTPUT"
+
+          # --- Release detection ---
+          BUILD_RELEASE=false
+          RELEASE_VERSION="${{ steps.upstream.outputs.release_version }}"
+          RELEASE_REF="${{ steps.upstream.outputs.release_tag }}"
+          CURRENT_RELEASE="${{ steps.current.outputs.release_version }}"
+
+          if [[ -n "${{ inputs.sglang_ref }}" ]]; then
+            REF="${{ inputs.sglang_ref }}"
+            if [[ "$REF" == v* ]]; then
+              # Manual release override
+              RELEASE_VERSION="${REF#v}"
+              RELEASE_REF="${REF}"
+              BUILD_RELEASE=true
+              echo "Manual override: release build for ${REF}"
+            else
+              # Manual nightly override (branch or SHA) — skip release
+              BUILD_RELEASE=false
+            fi
+          elif [[ "${{ inputs.skip_release_check }}" == "true" ]]; then
+            echo "Skipping release check per input"
+          elif [[ -n "$RELEASE_VERSION" && "$RELEASE_VERSION" != "$CURRENT_RELEASE" ]]; then
+            BUILD_RELEASE=true
+            echo "New release available: ${RELEASE_VERSION} (current: ${CURRENT_RELEASE})"
+          else
+            echo "Release up to date: ${CURRENT_RELEASE}"
+          fi
+
+          echo "build_release=${BUILD_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "release_version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_ref=${RELEASE_REF}" >> "$GITHUB_OUTPUT"
+
+          # --- Nightly detection ---
+          BUILD_NIGHTLY=false
+          NIGHTLY_SHA="${{ steps.upstream.outputs.main_sha }}"
+          NIGHTLY_SHORT_SHA="${{ steps.upstream.outputs.main_short_sha }}"
+          NIGHTLY_VERSION="${{ steps.upstream.outputs.main_version }}"
+          CURRENT_SHA="${{ steps.current.outputs.nightly_sha }}"
+
+          if [[ -n "${{ inputs.sglang_ref }}" ]]; then
+            REF="${{ inputs.sglang_ref }}"
+            if [[ "$REF" != v* ]]; then
+              # Manual nightly override
+              if echo "${REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then
+                NIGHTLY_SHA="${REF}"
+                NIGHTLY_SHORT_SHA=$(echo "${REF}" | head -c 7)
+              elif [[ "$REF" == "main" ]]; then
+                # Use detected main SHA
+                :
+              else
+                # Branch name — resolve to SHA
+                BRANCH_JSON=$(curl -sf "https://api.github.com/repos/sgl-project/sglang/commits/${REF}" || echo '{}')
+                RESOLVED_SHA=$(echo "$BRANCH_JSON" | jq -r '.sha // empty')
+                if [[ -n "$RESOLVED_SHA" ]]; then
+                  NIGHTLY_SHA="${RESOLVED_SHA}"
+                  NIGHTLY_SHORT_SHA=$(echo "${RESOLVED_SHA}" | head -c 7)
+                fi
+              fi
+              BUILD_NIGHTLY=true
+              echo "Manual override: nightly build for ${REF} (${NIGHTLY_SHORT_SHA})"
+            fi
+          elif [[ "${{ inputs.skip_nightly_check }}" == "true" ]]; then
+            echo "Skipping nightly check per input"
+          elif [[ -n "$NIGHTLY_SHA" && "$NIGHTLY_SHA" != "$CURRENT_SHA" ]]; then
+            BUILD_NIGHTLY=true
+            echo "New main commit: ${NIGHTLY_SHORT_SHA} (current: ${CURRENT_SHA:-none})"
+          else
+            echo "Nightly up to date: ${NIGHTLY_SHORT_SHA}"
+          fi
+
+          echo "build_nightly=${BUILD_NIGHTLY}" >> "$GITHUB_OUTPUT"
+          echo "nightly_sha=${NIGHTLY_SHA}" >> "$GITHUB_OUTPUT"
+          echo "nightly_short_sha=${NIGHTLY_SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "nightly_version=${NIGHTLY_VERSION}" >> "$GITHUB_OUTPUT"
+
+  build-release:
+    needs: check-updates
+    if: needs.check-updates.outputs.build_release == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse parameters file
+        id: params
+        run: |
+          PARAMS_FILE="container-recipes/sglang-nightly.parameters"
+          if [[ ! -f "$PARAMS_FILE" ]]; then
+            echo "::error::Parameters file not found: ${PARAMS_FILE}"
+            exit 1
+          fi
+
+          while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$key" ]] && continue
+            key=$(echo "$key" | xargs)
+            value=$(echo "$value" | xargs)
+            [[ -z "$key" ]] && continue
+            echo "${key}=${value}" >> "$GITHUB_OUTPUT"
+          done < "$PARAMS_FILE"
+
+          echo "Parameters loaded from ${PARAMS_FILE}"
+
+      - name: Generate recipe file
+        id: recipe
+        run: |
+          VERSION="${{ needs.check-updates.outputs.release_version }}"
+          REF="${{ needs.check-updates.outputs.release_ref }}"
+          DATE_TAG="${{ needs.check-updates.outputs.date_tag }}"
+          IMAGE_TAG="scitrera/dgx-spark-sglang-nightly:${VERSION}"
+          RECIPE_FILE="container-recipes/sglang-nightly-v${VERSION}.recipe"
+
+          cat > "$RECIPE_FILE" <<EOF
+          DOCKERFILE=${{ steps.params.outputs.DOCKERFILE }}
+          TARGET=${{ steps.params.outputs.TARGET }}
+          BASE_IMAGE=${{ steps.params.outputs.BASE_IMAGE }}
+          BUILD_JOBS=${{ steps.params.outputs.BUILD_JOBS }}
+          CUDA_ARCHITECTURES=${{ steps.params.outputs.CUDA_ARCHITECTURES }}
+          TORCH_CUDA_ARCH_LIST=${{ steps.params.outputs.TORCH_CUDA_ARCH_LIST }}
+          NVCC_GENCODE=${{ steps.params.outputs.NVCC_GENCODE }}
+          FLASHINFER_VERSION=${{ steps.params.outputs.FLASHINFER_VERSION }}
+          TRANSFORMERS_VERSION=${{ steps.params.outputs.TRANSFORMERS_VERSION }}
+          SGLANG_VERSION=${VERSION}
+          SGLANG_REF=${REF}
+          IMAGE_TAG=${IMAGE_TAG}
+          EOF
+
+          # Remove leading whitespace from heredoc indentation
+          sed -i 's/^          //' "$RECIPE_FILE"
+
+          echo "recipe_file=${RECIPE_FILE}" >> "$GITHUB_OUTPUT"
+          echo "Generated recipe:"
+          cat "$RECIPE_FILE"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache
+          sudo apt-get clean
+          echo "Available disk space:"
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./container-build
+          file: ./container-build/${{ steps.params.outputs.DOCKERFILE }}
+          target: ${{ steps.params.outputs.TARGET }}
+          platforms: linux/arm64
+          push: true
+          tags: |
+            scitrera/dgx-spark-sglang-nightly:${{ needs.check-updates.outputs.release_version }}
+            scitrera/dgx-spark-sglang-nightly:${{ needs.check-updates.outputs.date_tag }}
+            scitrera/dgx-spark-sglang-nightly:latest
+          build-args: |
+            BASE_IMAGE=${{ steps.params.outputs.BASE_IMAGE }}
+            BUILD_JOBS=${{ steps.params.outputs.BUILD_JOBS }}
+            CUDA_ARCHITECTURES=${{ steps.params.outputs.CUDA_ARCHITECTURES }}
+            TORCH_CUDA_ARCH_LIST=${{ steps.params.outputs.TORCH_CUDA_ARCH_LIST }}
+            NVCC_GENCODE=${{ steps.params.outputs.NVCC_GENCODE }}
+            FLASHINFER_VERSION=${{ steps.params.outputs.FLASHINFER_VERSION }}
+            TRANSFORMERS_VERSION=${{ steps.params.outputs.TRANSFORMERS_VERSION }}
+            SGLANG_VERSION=${{ needs.check-updates.outputs.release_version }}
+            SGLANG_REF=${{ needs.check-updates.outputs.release_ref }}
+          labels: |
+            maintainer=scitrera.ai <open-source-team@scitrera.com>
+            dev.scitrera.sglang_version=${{ needs.check-updates.outputs.release_version }}
+          cache-from: type=registry,ref=scitrera/dgx-spark-sglang-nightly:buildcache
+          cache-to: type=registry,ref=scitrera/dgx-spark-sglang-nightly:buildcache,mode=max
+
+      - name: Build and push wheel carrier image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./container-build
+          file: ./container-build/${{ steps.params.outputs.DOCKERFILE }}
+          target: wheels
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ghcr.io/scitrera/sglang-nightly-wheels:${{ needs.check-updates.outputs.release_version }}
+            ghcr.io/scitrera/sglang-nightly-wheels:${{ needs.check-updates.outputs.date_tag }}
+            ghcr.io/scitrera/sglang-nightly-wheels:latest
+          build-args: |
+            BASE_IMAGE=${{ steps.params.outputs.BASE_IMAGE }}
+            BUILD_JOBS=${{ steps.params.outputs.BUILD_JOBS }}
+            CUDA_ARCHITECTURES=${{ steps.params.outputs.CUDA_ARCHITECTURES }}
+            TORCH_CUDA_ARCH_LIST=${{ steps.params.outputs.TORCH_CUDA_ARCH_LIST }}
+            NVCC_GENCODE=${{ steps.params.outputs.NVCC_GENCODE }}
+            FLASHINFER_VERSION=${{ steps.params.outputs.FLASHINFER_VERSION }}
+            TRANSFORMERS_VERSION=${{ steps.params.outputs.TRANSFORMERS_VERSION }}
+            SGLANG_VERSION=${{ needs.check-updates.outputs.release_version }}
+            SGLANG_REF=${{ needs.check-updates.outputs.release_ref }}
+          labels: |
+            maintainer=scitrera.ai <open-source-team@scitrera.com>
+            dev.scitrera.sglang_version=${{ needs.check-updates.outputs.release_version }}
+
+      - name: Archive old recipe and commit new one
+        run: |
+          VERSION="${{ needs.check-updates.outputs.release_version }}"
+          RECIPE_FILE="${{ steps.recipe.outputs.recipe_file }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Pull latest to handle concurrent nightly job commits
+          git pull --rebase
+
+          # Ensure archive directory exists
+          mkdir -p container-recipes/archive
+
+          # Move old sglang-nightly release recipes to archive (excluding the new one)
+          for old_recipe in container-recipes/sglang-nightly-v*.recipe; do
+            [[ "$old_recipe" == "$RECIPE_FILE" ]] && continue
+            [[ -f "$old_recipe" ]] || continue
+            git mv "$old_recipe" container-recipes/archive/
+          done
+
+          # Stage the new recipe
+          git add "$RECIPE_FILE"
+          git add container-recipes/archive/
+
+          # Commit and push
+          git commit -m "feat: auto-update sglang-nightly release to v${VERSION}"
+          git push
+
+  build-nightly:
+    needs: check-updates
+    if: needs.check-updates.outputs.build_nightly == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse parameters file
+        id: params
+        run: |
+          PARAMS_FILE="container-recipes/sglang-nightly.parameters"
+          if [[ ! -f "$PARAMS_FILE" ]]; then
+            echo "::error::Parameters file not found: ${PARAMS_FILE}"
+            exit 1
+          fi
+
+          while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$key" ]] && continue
+            key=$(echo "$key" | xargs)
+            value=$(echo "$value" | xargs)
+            [[ -z "$key" ]] && continue
+            echo "${key}=${value}" >> "$GITHUB_OUTPUT"
+          done < "$PARAMS_FILE"
+
+          echo "Parameters loaded from ${PARAMS_FILE}"
+
+      - name: Compute nightly tags
+        id: tag
+        run: |
+          VERSION="${{ needs.check-updates.outputs.nightly_version }}"
+          SHORT_SHA="${{ needs.check-updates.outputs.nightly_short_sha }}"
+          DATE_TAG="${{ needs.check-updates.outputs.date_tag }}"
+
+          # Docker/OCI tags can't contain '+', use '-' separator
+          DOCKER_VERSION="${VERSION}-git${SHORT_SHA}.${DATE_TAG}"
+          # PEP 440 local identifier for wheel filenames
+          PEP440_VERSION="${VERSION}+git${SHORT_SHA}.${DATE_TAG}"
+
+          echo "docker_version=${DOCKER_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "pep440_version=${PEP440_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Docker tag: ${DOCKER_VERSION}"
+          echo "PEP 440 version: ${PEP440_VERSION}"
+
+      - name: Generate recipe file
+        id: recipe
+        run: |
+          VERSION="${{ needs.check-updates.outputs.nightly_version }}"
+          SHORT_SHA="${{ needs.check-updates.outputs.nightly_short_sha }}"
+          FULL_SHA="${{ needs.check-updates.outputs.nightly_sha }}"
+          DATE_TAG="${{ needs.check-updates.outputs.date_tag }}"
+          DOCKER_VERSION="${{ steps.tag.outputs.docker_version }}"
+          IMAGE_TAG="scitrera/dgx-spark-sglang-nightly:${DOCKER_VERSION}"
+          RECIPE_FILE="container-recipes/sglang-nightly-main-${DATE_TAG}.recipe"
+
+          cat > "$RECIPE_FILE" <<EOF
+          DOCKERFILE=${{ steps.params.outputs.DOCKERFILE }}
+          TARGET=${{ steps.params.outputs.TARGET }}
+          BASE_IMAGE=${{ steps.params.outputs.BASE_IMAGE }}
+          BUILD_JOBS=${{ steps.params.outputs.BUILD_JOBS }}
+          CUDA_ARCHITECTURES=${{ steps.params.outputs.CUDA_ARCHITECTURES }}
+          TORCH_CUDA_ARCH_LIST=${{ steps.params.outputs.TORCH_CUDA_ARCH_LIST }}
+          NVCC_GENCODE=${{ steps.params.outputs.NVCC_GENCODE }}
+          FLASHINFER_VERSION=${{ steps.params.outputs.FLASHINFER_VERSION }}
+          TRANSFORMERS_VERSION=${{ steps.params.outputs.TRANSFORMERS_VERSION }}
+          SGLANG_VERSION=${VERSION}-git${SHORT_SHA}
+          SGLANG_REF=${FULL_SHA}
+          SGLANG_SHA=${FULL_SHA}
+          IMAGE_TAG=${IMAGE_TAG}
+          EOF
+
+          # Remove leading whitespace from heredoc indentation
+          sed -i 's/^          //' "$RECIPE_FILE"
+
+          echo "recipe_file=${RECIPE_FILE}" >> "$GITHUB_OUTPUT"
+          echo "Generated recipe:"
+          cat "$RECIPE_FILE"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache
+          sudo apt-get clean
+          echo "Available disk space:"
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./container-build
+          file: ./container-build/${{ steps.params.outputs.DOCKERFILE }}
+          target: ${{ steps.params.outputs.TARGET }}
+          platforms: linux/arm64
+          push: true
+          tags: |
+            scitrera/dgx-spark-sglang-nightly:${{ steps.tag.outputs.docker_version }}
+            scitrera/dgx-spark-sglang-nightly:${{ needs.check-updates.outputs.date_tag }}
+            scitrera/dgx-spark-sglang-nightly:latest
+          build-args: |
+            BASE_IMAGE=${{ steps.params.outputs.BASE_IMAGE }}
+            BUILD_JOBS=${{ steps.params.outputs.BUILD_JOBS }}
+            CUDA_ARCHITECTURES=${{ steps.params.outputs.CUDA_ARCHITECTURES }}
+            TORCH_CUDA_ARCH_LIST=${{ steps.params.outputs.TORCH_CUDA_ARCH_LIST }}
+            NVCC_GENCODE=${{ steps.params.outputs.NVCC_GENCODE }}
+            FLASHINFER_VERSION=${{ steps.params.outputs.FLASHINFER_VERSION }}
+            TRANSFORMERS_VERSION=${{ steps.params.outputs.TRANSFORMERS_VERSION }}
+            SGLANG_VERSION=${{ steps.tag.outputs.pep440_version }}
+            SGLANG_REF=${{ needs.check-updates.outputs.nightly_sha }}
+          labels: |
+            maintainer=scitrera.ai <open-source-team@scitrera.com>
+            dev.scitrera.sglang_version=${{ steps.tag.outputs.docker_version }}
+            dev.scitrera.sglang_sha=${{ needs.check-updates.outputs.nightly_sha }}
+          cache-from: type=registry,ref=scitrera/dgx-spark-sglang-nightly:buildcache
+          cache-to: type=registry,ref=scitrera/dgx-spark-sglang-nightly:buildcache,mode=max
+
+      - name: Build and push wheel carrier image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./container-build
+          file: ./container-build/${{ steps.params.outputs.DOCKERFILE }}
+          target: wheels
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ghcr.io/scitrera/sglang-nightly-wheels:${{ steps.tag.outputs.docker_version }}
+            ghcr.io/scitrera/sglang-nightly-wheels:${{ needs.check-updates.outputs.date_tag }}
+            ghcr.io/scitrera/sglang-nightly-wheels:latest
+          build-args: |
+            BASE_IMAGE=${{ steps.params.outputs.BASE_IMAGE }}
+            BUILD_JOBS=${{ steps.params.outputs.BUILD_JOBS }}
+            CUDA_ARCHITECTURES=${{ steps.params.outputs.CUDA_ARCHITECTURES }}
+            TORCH_CUDA_ARCH_LIST=${{ steps.params.outputs.TORCH_CUDA_ARCH_LIST }}
+            NVCC_GENCODE=${{ steps.params.outputs.NVCC_GENCODE }}
+            FLASHINFER_VERSION=${{ steps.params.outputs.FLASHINFER_VERSION }}
+            TRANSFORMERS_VERSION=${{ steps.params.outputs.TRANSFORMERS_VERSION }}
+            SGLANG_VERSION=${{ steps.tag.outputs.pep440_version }}
+            SGLANG_REF=${{ needs.check-updates.outputs.nightly_sha }}
+          labels: |
+            maintainer=scitrera.ai <open-source-team@scitrera.com>
+            dev.scitrera.sglang_version=${{ steps.tag.outputs.docker_version }}
+            dev.scitrera.sglang_sha=${{ needs.check-updates.outputs.nightly_sha }}
+
+      - name: Archive old recipe and commit new one
+        run: |
+          DATE_TAG="${{ needs.check-updates.outputs.date_tag }}"
+          RECIPE_FILE="${{ steps.recipe.outputs.recipe_file }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Pull latest to handle concurrent release job commits
+          git pull --rebase
+
+          # Ensure archive directory exists
+          mkdir -p container-recipes/archive
+
+          # Move old sglang-nightly nightly recipes to archive (excluding the new one)
+          for old_recipe in container-recipes/sglang-nightly-main-*.recipe; do
+            [[ "$old_recipe" == "$RECIPE_FILE" ]] && continue
+            [[ -f "$old_recipe" ]] || continue
+            git mv "$old_recipe" container-recipes/archive/
+          done
+
+          # Stage the new recipe
+          git add "$RECIPE_FILE"
+          git add container-recipes/archive/
+
+          # Commit and push
+          git commit -m "feat: auto-update sglang-nightly main to ${DATE_TAG}"
+          git push

@@ -1,0 +1,150 @@
+# SGLang Nightly Dockerfile
+# Based on a PyTorch image with CUDA/triton pre-installed (default: NVCR PyTorch)
+# Supports tagged releases and main-branch nightly builds
+
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3
+
+# =============================================================================
+# Builder stage: build sglang + sgl-kernel from source
+# =============================================================================
+FROM ${BASE_IMAGE} AS builder
+
+ARG SGLANG_VERSION=""
+ARG SGLANG_REF="main"
+ARG BUILD_JOBS=2
+ARG CUDA_ARCHITECTURES=121
+ARG TORCH_CUDA_ARCH_LIST="12.1a"
+ARG NVCC_GENCODE="-gencode=arch=compute_121,code=sm_121"
+ARG FLASHINFER_VERSION=""
+ARG TRANSFORMERS_VERSION=""
+ARG TRANSFORMERS_REF=""
+ARG TRANSFORMERS_PRE=0
+
+RUN apt-get update && apt-get install -y --no-install-recommends ccache && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV MAX_JOBS=${BUILD_JOBS} \
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    NVCC_GENCODE=${NVCC_GENCODE} \
+    CCACHE_DIR=/root/.ccache \
+    CCACHE_MAXSIZE=10G \
+    CCACHE_COMPRESS=1 \
+    CMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    CMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+    PATH=/usr/lib/ccache:$PATH \
+    DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /data
+
+# Clone sglang repo; SGLANG_REF supports tag, branch, or full commit SHA
+RUN if echo "${SGLANG_REF}" | grep -qE '^[0-9a-fA-F]{40}$'; then \
+        git clone https://github.com/sgl-project/sglang.git && \
+        cd sglang && \
+        git checkout "${SGLANG_REF}" && \
+        git submodule update --init --recursive; \
+    else \
+        git clone -b "${SGLANG_REF}" --depth 1 --recursive https://github.com/sgl-project/sglang.git; \
+    fi
+
+WORKDIR /data/sglang
+
+# Patch version in pyproject.toml if SGLANG_VERSION is set (for nightly wheel versioning)
+RUN if [ -n "${SGLANG_VERSION}" ]; then \
+        sed -i "s/^version = .*/version = \"${SGLANG_VERSION}\"/" python/pyproject.toml; \
+        if [ -f sgl-kernel/pyproject.toml ]; then \
+            sed -i "s/^version = .*/version = \"${SGLANG_VERSION}\"/" sgl-kernel/pyproject.toml; \
+        fi; \
+    fi
+
+# Install sglang package (no deps, no build isolation since NVCR has torch)
+RUN pip install --no-build-isolation --no-deps ./python
+
+# Build sgl-kernel: install build deps then build wheel
+RUN --mount=type=cache,id=ccache,target=/root/.ccache \
+    cd sgl-kernel && \
+    make install-deps && \
+    mkdir -p /data/wheels && \
+    pip wheel --no-build-isolation --no-deps -w /data/wheels \
+      --config-settings=build-dir=build \
+      "--config-settings=build.tool-args=-j${MAX_JOBS}" \
+      "--config-settings=cmake.args=-DSGL_KERNEL_COMPILE_THREADS=1" \
+      .
+
+# Build sglang wheel
+RUN pip wheel --no-build-isolation --no-deps -w /data/wheels ./python
+
+# Install sgl-kernel from the wheel we just built
+RUN pip install /data/wheels/sgl_kernel-*.whl --no-deps
+
+# Optional: install specific FlashInfer version from wheels index (skip if blank)
+RUN if [ -n "$FLASHINFER_VERSION" ]; then \
+        pip install --pre flashinfer-python==${FLASHINFER_VERSION} --no-deps --index-url https://flashinfer.ai/whl && \
+        pip install --pre flashinfer-cubin==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl && \
+        pip install --pre flashinfer-jit-cache==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl/cu130; \
+    fi
+
+# Install remaining deps: xgrammar, fastsafetensors, ray, numba, grpcio-tools, multimodal support
+RUN pip install \
+        packaging \
+        xgrammar \
+        fastsafetensors \
+        ray[default] \
+        numba \
+        grpcio-tools \
+        qwen-vl-utils
+
+# Resolve any missing deps declared in sglang's pyproject.toml
+COPY --chmod=0755 stages/missing_deps.py /opt/missing_deps.py
+RUN cd /data/sglang/python && \
+        /opt/missing_deps.py --extra diffusion \
+        --ignore sgl-kernel \
+        --ignore triton \
+        --ignore torch \
+        --ignore torchaudio \
+        --ignore torchvision \
+        --ignore torchcodec \
+        > missing_deps.txt && \
+    pip install -r missing_deps.txt && \
+    rm missing_deps.txt /opt/missing_deps.py
+
+# Late transformers install if version is specified
+RUN if [ -n "$TRANSFORMERS_REF" ]; then \
+        pip install -U git+https://github.com/huggingface/transformers.git@${TRANSFORMERS_REF}; \
+    elif [ -n "$TRANSFORMERS_VERSION" ]; then \
+        pip install -U transformers==${TRANSFORMERS_VERSION} --pre; \
+    elif [ "$TRANSFORMERS_PRE" = "1" ]; then \
+        pip install -U transformers --pre; \
+    fi
+
+# Break up dist-packages into smaller layers to avoid hitting Docker layer size limits
+COPY stages/directory_split2.sh /opt/directory_split2.sh
+RUN chmod +x /opt/directory_split2.sh && \
+    /opt/directory_split2.sh \
+      /usr/local/lib/python3.12/dist-packages \
+      4
+
+# =============================================================================
+# Runtime stage: clean image with installed packages
+# =============================================================================
+FROM ${BASE_IMAGE} AS runtime
+
+ARG TORCH_CUDA_ARCH_LIST="12.1a"
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+
+# Copy Python dependencies from builder (split into 4 layers for size management)
+COPY --from=builder /usr/local/lib/python3.12/dist-packages-1/ /usr/local/lib/python3.12/dist-packages/
+COPY --from=builder /usr/local/lib/python3.12/dist-packages-2/ /usr/local/lib/python3.12/dist-packages/
+COPY --from=builder /usr/local/lib/python3.12/dist-packages-3/ /usr/local/lib/python3.12/dist-packages/
+COPY --from=builder /usr/local/lib/python3.12/dist-packages-4/ /usr/local/lib/python3.12/dist-packages/
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+WORKDIR /data/sglang
+RUN apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# =============================================================================
+# Wheel carrier stage: minimal image containing just the built wheels
+# Consumers use: COPY --from=ghcr.io/scitrera/sglang-nightly-wheels:tag /wheels/ /tmp/wheels/
+# =============================================================================
+FROM busybox:stable AS wheels
+
+COPY --from=builder /data/wheels/ /wheels/
