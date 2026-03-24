@@ -64,10 +64,10 @@ RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     cd sgl-kernel && \
     make install-deps && \
     mkdir -p /data/wheels && \
-    pip wheel --no-build-isolation --no-deps -w /data/wheels \
+    pip wheel --no-build-isolation --no-deps -w /data/wheels -v \
       --config-settings=build-dir=build \
-      "--config-settings=build.tool-args=-j${MAX_JOBS}" \
-      "--config-settings=cmake.args=-DSGL_KERNEL_COMPILE_THREADS=1" \
+      --config-settings=build.tool-args=-j${MAX_JOBS} \
+      --config-settings=cmake.args=-DSGL_KERNEL_COMPILE_THREADS=1 \
       .
 
 # Build sglang wheel
