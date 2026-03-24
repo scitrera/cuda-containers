@@ -1,9 +1,9 @@
 name: SGLang Nightly Tracker
 
 on:
-  schedule:
-    # Check for new releases/commits nightly at 4am UTC
-    - cron: '0 4 * * *'
+  #  schedule:
+  #    # Check for new releases/commits nightly at 4am UTC
+  #    - cron: '0 4 * * *'
   workflow_dispatch:
     inputs:
       sglang_ref:
