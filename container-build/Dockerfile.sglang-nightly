@@ -206,6 +206,6 @@ RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 # Wheel carrier stage: minimal image containing just the built wheels
 # Consumers use: COPY --from=ghcr.io/scitrera/sglang-nightly-wheels:tag /wheels/ /tmp/wheels/
 # =============================================================================
-FROM busybox:stable AS wheels
+FROM scratch AS wheels
 
 COPY --from=builder /data/wheels/ /wheels/
