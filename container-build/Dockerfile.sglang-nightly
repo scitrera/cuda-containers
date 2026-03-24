@@ -57,7 +57,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CCACHE_COMPRESS=1 \
     CMAKE_CXX_COMPILER_LAUNCHER=ccache \
     CMAKE_CUDA_COMPILER_LAUNCHER=ccache \
-    PATH=/usr/lib/ccache:$PATH
+    PATH=/usr/lib/ccache:$PATH \
+    NCCL_HOME=/usr/local \
+    LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 
 WORKDIR /data
 
