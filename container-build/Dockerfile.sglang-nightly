@@ -40,18 +40,24 @@ ENV MPI_HOME=/opt/openmpi
 
 RUN pip install uv
 
-ENV MAX_JOBS=${BUILD_JOBS} \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PIP_CACHE_DIR=/root/.cache/pip \
+    UV_CACHE_DIR=/root/.cache/uv \
+    UV_SYSTEM_PYTHON=1 \
+    UV_BREAK_SYSTEM_PACKAGES=1 \
+    UV_LINK_MODE=copy \
     CUDA_HOME=/usr/local/cuda \
     TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
-    NVCC_GENCODE=${NVCC_GENCODE} \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+    MAX_JOBS=${BUILD_JOBS} \
+    NVCC_GENCODE=${NVCC_GENCODE} \
     CCACHE_DIR=/root/.ccache \
     CCACHE_MAXSIZE=10G \
     CCACHE_COMPRESS=1 \
     CMAKE_CXX_COMPILER_LAUNCHER=ccache \
     CMAKE_CUDA_COMPILER_LAUNCHER=ccache \
-    PATH=/usr/lib/ccache:$PATH \
-    DEBIAN_FRONTEND=noninteractive
+    PATH=/usr/lib/ccache:$PATH
 
 WORKDIR /data
 
