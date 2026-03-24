@@ -131,7 +131,9 @@ RUN chmod +x /opt/directory_split2.sh && \
 FROM ${BASE_IMAGE} AS runtime
 
 ARG TORCH_CUDA_ARCH_LIST="12.1a"
-ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+ENV CUDA_HOME=/usr/local/cuda \
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 
 # Copy Python dependencies from builder (split into 4 layers for size management)
 COPY --from=builder /usr/local/lib/python3.12/dist-packages-1/ /usr/local/lib/python3.12/dist-packages/
