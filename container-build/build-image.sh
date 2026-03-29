@@ -79,7 +79,7 @@ KNOWN_BUILD_ARGS=(
     TORCH_REF TORCH_AUDIO_REF TORCH_VISION_REF
     FLASHINFER_VERSION TRANSFORMERS_VERSION TRITON_VERSION
     VLLM_VERSION VLLM_REF SGLANG_VERSION SGLANG_REF
-    DEV_BASE_IMAGE RUN_BASE_IMAGE TRANSFORMERS_REF
+    BASE_IMAGE DEV_BASE_IMAGE RUN_BASE_IMAGE TRANSFORMERS_REF
     VLLM_REPO
     LLAMACPP_VERSION LLAMACPP_REF CUDA_ARCHITECTURES
 )
@@ -219,7 +219,7 @@ fi
 # Collect version labels (all *_VERSION variables)
 declare -A VERSION_LABELS=()
 for key in "${!BUILD_ARG_VALUES[@]}"; do
-    if [[ "$key" == *_VERSION ]]; then
+    if [[ "$key" == *_VERSION && -n "${BUILD_ARG_VALUES[$key]}" ]]; then
         # Convert to lowercase label name: TORCH_VERSION -> org.scitrera.torch_version
         label_name="dev.scitrera.$(echo "$key" | tr '[:upper:]' '[:lower:]')"
         VERSION_LABELS["$label_name"]="${BUILD_ARG_VALUES[$key]}"

@@ -1,0 +1,12 @@
+DOCKERFILE=Dockerfile.sglang-nightly
+TARGET=wheels
+
+BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3
+
+FLASHINFER_VERSION=
+TRANSFORMERS_VERSION=
+
+SGLANG_VERSION=0.5.10rc0
+SGLANG_REF="v0.5.10rc0"
+
+IMAGE_TAG=scitrera/dgx-spark-sglang-wheels:0.5.10rc0
