@@ -2,7 +2,7 @@
 # Based on a PyTorch image with CUDA/triton pre-installed (default: NVCR PyTorch)
 # Supports tagged releases and main-branch nightly builds
 
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3
+ARG BASE_IMAGE=nvidia/cuda:13.2.0-cudnn-devel-ubuntu24.04
 
 # =============================================================================
 # Builder stage: build sglang + sgl-kernel from source
@@ -39,6 +39,9 @@ RUN apt-get update && apt-get upgrade -y \
 ENV MPI_HOME=/opt/openmpi
 
 RUN pip install uv
+
+# update cmake version
+RUN uv pip install --upgrade 'cmake==3.31.10'
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
@@ -147,7 +150,7 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
         /opt/missing_deps.py --extra diffusion \
         --ignore sgl-kernel \
         --ignore sglang-kernel \
-        --ignore triton \
+        --ignore cuda-python \
         --ignore torch \
         --ignore torchaudio \
         --ignore torchvision \
@@ -155,6 +158,11 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
         > missing_deps.txt && \
     uv pip install -r missing_deps.txt && \
     rm missing_deps.txt /opt/missing_deps.py
+
+# TODO: CUSTOM TRITON INSTALL ??
+# Install triton package (no deps, no build isolation since base has torch)
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv pip install --no-build-isolation --torch-backend=auto triton
 
 # Late transformers install if version is specified
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \

@@ -1,0 +1,12 @@
+DOCKERFILE=Dockerfile.sglang-nightly
+TARGET=runtime
+
+BASE_IMAGE=scitrera/dgx-spark-pytorch-dev:2.11.0-v1-cu132
+
+FLASHINFER_VERSION=0.6.7.post3
+TRANSFORMERS_VERSION=5.5.0
+
+SGLANG_VERSION=0.5.10
+SGLANG_REF="v0.5.10"
+
+IMAGE_TAG=scitrera/dgx-spark-sglang:0.5.10
