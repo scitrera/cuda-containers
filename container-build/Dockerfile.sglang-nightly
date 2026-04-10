@@ -1,5 +1,5 @@
 # SGLang Nightly Dockerfile
-# Based on a PyTorch image with CUDA/triton pre-installed (default: NVCR PyTorch)
+# Based on a PyTorch image with CUDA pre-installed
 # Supports tagged releases and main-branch nightly builds
 
 ARG BASE_IMAGE=nvidia/cuda:13.2.0-cudnn-devel-ubuntu24.04
@@ -16,9 +16,14 @@ ARG CUDA_ARCHITECTURES=121
 ARG TORCH_CUDA_ARCH_LIST="12.1a"
 ARG NVCC_GENCODE="-gencode=arch=compute_121,code=sm_121"
 ARG FLASHINFER_VERSION=""
-ARG TRANSFORMERS_VERSION=""
-ARG TRANSFORMERS_REF=""
-ARG TRANSFORMERS_PRE=0
+
+# Apply constraints to protect our torch/vision/audio versions from accidental upgrades during sgl-kernel build
+RUN python3 -c "import torch, torchvision, torchaudio; \
+     open('/tmp/torch-constraints.txt','w').write( \
+       f'torch=={torch.__version__}\ntorchvision=={torchvision.__version__}\ntorchaudio=={torchaudio.__version__}\n')" \
+     && cat /tmp/torch-constraints.txt
+ENV PIP_CONSTRAINT=/tmp/torch-constraints.txt \
+    UV_CONSTRAINT=/tmp/torch-constraints.txt
 
 RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --allow-change-held-packages --no-install-recommends \
@@ -87,6 +92,9 @@ RUN if [ -n "${SGLANG_VERSION}" ]; then \
         fi; \
     fi
 
+ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG=${SGLANG_VERSION} \
+    SETUPTOOLS_SCM_PRETEND_VERSION=${SGLANG_VERSION}
+
 # Install sglang package (no deps, no build isolation since base has torch)
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv pip install --no-build-isolation --no-deps ./python
@@ -128,8 +136,8 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     if [ -n "$FLASHINFER_VERSION" ]; then \
         uv pip install --pre flashinfer-python==${FLASHINFER_VERSION} --no-deps --index-url https://flashinfer.ai/whl && \
-        uv pip install --pre flashinfer-cubin==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl && \
-        uv pip install --pre flashinfer-jit-cache==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl/cu130; \
+        uv pip install --pre flashinfer-cubin==${FLASHINFER_VERSION} --no-deps --index-url https://flashinfer.ai/whl && \
+        uv pip install --pre flashinfer-jit-cache==${FLASHINFER_VERSION} --no-deps --index-url https://flashinfer.ai/whl/cu130; \
     fi
 
 # Install remaining deps: xgrammar, fastsafetensors, ray, numba, grpcio-tools, multimodal support
@@ -162,9 +170,12 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
 # TODO: CUSTOM TRITON INSTALL ??
 # Install triton package (no deps, no build isolation since base has torch)
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    uv pip install --no-build-isolation --torch-backend=auto triton
+    uv pip install --no-build-isolation triton
 
 # Late transformers install if version is specified
+ARG TRANSFORMERS_VERSION=""
+ARG TRANSFORMERS_REF=""
+ARG TRANSFORMERS_PRE=0
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     if [ -n "$TRANSFORMERS_REF" ]; then \
         uv pip install -U git+https://github.com/huggingface/transformers.git@${TRANSFORMERS_REF}; \
@@ -217,6 +228,9 @@ COPY --from=builder /usr/local/lib/python3.12/dist-packages-2/ /usr/local/lib/py
 COPY --from=builder /usr/local/lib/python3.12/dist-packages-3/ /usr/local/lib/python3.12/dist-packages/
 COPY --from=builder /usr/local/lib/python3.12/dist-packages-4/ /usr/local/lib/python3.12/dist-packages/
 COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Override some ENV variables for runtime use
+ENV CCACHE_DIR=/tmp/.ccache
 
 WORKDIR /data/sglang
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
