@@ -1,0 +1,25 @@
+DOCKERFILE=Dockerfile.llm_inference
+TARGET=vllm_runtime
+
+DEV_BASE_IMAGE=scitrera/dgx-spark-pytorch-dev:2.12.0-v1-cu132
+RUN_BASE_IMAGE=scitrera/dgx-spark-pytorch-dev:2.12.0-v1-cu132
+
+FLASHINFER_VERSION=0.6.12
+TRITON_VERSION=3.7.0
+
+TRANSFORMERS_VERSION=5.10.2
+#TRANSFORMERS_REF=""
+
+VLLM_VERSION=0.22.1-jasl-ds4+21a54ea
+# Pin to exact commit (matches +21a54ea above); this is the head of branch
+# codex/ds4-sm120-min-enable. A full 40-char SHA is used so the Dockerfile does
+# a full clone + checkout (40-hex path); branch refs would use --depth 1.
+VLLM_REF="21a54eacf6ae01b7d8f2a660f9256eb794058898"
+VLLM_REPO="https://github.com/jasl/vllm.git"
+
+# Optional DS4 SM120/SM121 research kernels (compressed MLA, FP4 MoE, FP8
+# block-linear, etc.). Installed --no-deps as the final vllm_runtime layer.
+# Leave blank to omit. Per jasl's harness: research-only; import != active.
+INSTALL_B12X="==0.20.0"
+
+IMAGE_TAG=scitrera/dgx-spark-vllm-jasl-ds4:20260609

@@ -6,9 +6,10 @@ ARG TORCH_CUDA_ARCH_LIST="12.1a"
 ARG NVCC_GENCODE="-gencode=arch=compute_121,code=sm_121"
 ARG TORCH_VERSION="2.9.1"
 ARG UBUNTU_VERSION="24.04"
+ARG CUDA_VARIANT="devel"
 
 # Stage 1: Base Runtime Image
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS base
+FROM nvidia/cuda:${CUDA_VERSION}-${CUDA_VARIANT}-ubuntu${UBUNTU_VERSION} AS base
 
 ARG TORCH_CUDA_ARCH_LIST="12.1a"
 

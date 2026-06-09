@@ -8,7 +8,7 @@ ARG FLASHINFER_VERSION="0.6.0"
 
 # Install additional dependencies
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    uv pip install xgrammar fastsafetensors
+    uv pip install xgrammar fastsafetensors instanttensor
 
 # Install FlashInfer packages;
 # TODO: also support FLASHINFER_REF to build directly from git
@@ -65,8 +65,8 @@ RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     uv pip install -r python/requirements.txt && \
     mkdir -p /data/wheels && \
     rm -rf .git && \
-    uv build --no-build-isolation --out-dir=/data/wheels -v . && \
-    uv build --no-build-isolation --no-index --out-dir=/data/wheels python/triton_kernels
+    uv build --wheel --no-build-isolation --out-dir=/data/wheels -v . && \
+    uv build --wheel --no-build-isolation --no-index --out-dir=/data/wheels python/triton_kernels
 
 FROM triton_builder AS vllm_builder
 
@@ -104,9 +104,15 @@ RUN --mount=type=cache,id=ccache,target=/root/.ccache \
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     python3 use_existing_torch.py && \
     sed -i "/flashinfer/d" requirements/cuda.txt && \
-    sed -i '/^triton\b/d' requirements/test.txt && \
-    sed -i '/^fastsafetensors\b/d' requirements/test.txt && \
-    uv pip install -r requirements/build.txt
+    if [ -f requirements/test.txt ]; then \
+        sed -i '/^triton\b/d' requirements/test.txt && \
+        sed -i '/^fastsafetensors\b/d' requirements/test.txt; \
+    fi && \
+    if [ -f requirements/build.txt ]; then \
+        uv pip install -r requirements/build.txt; \
+    else \
+        uv pip install -r requirements/build/cuda.txt; \
+    fi
 
 # build vllm
 RUN --mount=type=cache,id=ccache,target=/root/.ccache \
@@ -302,6 +308,19 @@ ENV PATH=/data/vllm:$PATH \
     TIKTOKEN_ENCODINGS_BASE=/data/tiktoken_encodings
 
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Optional DS4 SM120/SM121 research kernels (compressed MLA, compressed/sparse
+# indexer, native FP4 MoE, FP8 block-linear, PCIe all-reduce). Tacked on last so
+# all heavy layers (triton, vllm compile, directory split, dist-package copies)
+# stay cached; b12x is a pure-Python py3-none-any wheel installed --no-deps so it
+# cannot pull a different torch/CUDA/CUTLASS/NCCL stack. Off by default; set
+# INSTALL_B12X (e.g. ">=0.20.0") in the recipe to enable. A successful import is
+# not enough -- vLLM serve logs must show the b12x backends actually selected.
+ARG INSTALL_B12X=""
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    if [ -n "$INSTALL_B12X" ]; then \
+        uv pip install --no-deps "b12x${INSTALL_B12X}"; \
+    fi
 
 ARG RUN_BASE_IMAGE
 FROM ${RUN_BASE_IMAGE} AS sglang_runtime
